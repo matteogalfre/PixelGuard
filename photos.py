@@ -1,22 +1,18 @@
 import os
 import subprocess
 from datetime import datetime
-import locale
 import re
 import sys
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTextEdit, QWidget, QListWidget, QFileDialog, QTreeWidget, QTreeWidgetItem, 
+    QPlainTextEdit, QWidget, QListWidget, QFileDialog, QTreeWidget, QTreeWidgetItem, 
     QDialog, QProgressBar, QGroupBox, QSplitter, QCheckBox, QComboBox, QMenu, QLineEdit
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QMetaObject, Q_ARG
 from dateutil.relativedelta import relativedelta
-import json
-import threading
 from concurrent.futures import ThreadPoolExecutor
 import queue
 from PyQt5.QtGui import QIcon
-
 
 class TransferThread(QThread):
     log = pyqtSignal(str)
@@ -110,14 +106,6 @@ class TransferThread(QThread):
         return False
 
 class PhotoTransferApp(QMainWindow):
-    def is_android_connected(self):
-        try:
-            result = subprocess.run([self.adb_path, 'get-state'], capture_output=True, text=True)
-            return 'device' in result.stdout
-        except Exception as e:
-            self.log(f"Erreur lors de la vérification de la connexion Android: {e}")
-            return False
-
     def __init__(self):
         super().__init__()
         self.target_base_path = os.path.expanduser('~\\Desktop\\Photos Samsung Matt\\1 un\\2 deux')
@@ -127,8 +115,8 @@ class PhotoTransferApp(QMainWindow):
         self.selected_month = datetime.now()
         self.filter_photos = True
         self.filter_videos = True
-        self.settings_file = "app_settings.json"
-        self.load_settings()
+        self.connection_status = None
+
         self.init_ui()
         self.setStyleSheet("""
             QWidget {
@@ -153,7 +141,7 @@ class PhotoTransferApp(QMainWindow):
                 padding: 5px;
                 font-weight: bold;
             }
-            QListWidget, QTextEdit {
+            QListWidget, QPlainTextEdit {
                 background-color: #323232;
                 border: 1px solid #3a3a3a;
                 border-radius: 4px;
@@ -192,10 +180,13 @@ class PhotoTransferApp(QMainWindow):
                 height: 13px;
             }
         """)
-        self.connection_status = None
+        self.setWindowIcon(QIcon('icons/PixelGuard.png'))  # Set the window icon
         self.check_smartphone_connection()
         self.start_connection_timer()
         self.populate_source_list()
+
+    def log(self, message):
+        QMetaObject.invokeMethod(self.log_area, "appendPlainText", Q_ARG(str, message))
 
     def start_connection_timer(self):
         self.timer = QTimer(self)
@@ -212,6 +203,14 @@ class PhotoTransferApp(QMainWindow):
                 self.log("Smartphone débranché")
                 self.connection_status = "débranché"
 
+    def is_android_connected(self):
+        try:
+            result = subprocess.run([self.adb_path, 'get-state'], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            return 'device' in result.stdout
+        except Exception as e:
+            self.log(f"Erreur lors de la vérification de la connexion Android: {e}")
+            return False
+
     def populate_source_list(self):
         unique_folders = set()
         for folder, _ in self.source_folders:
@@ -221,13 +220,36 @@ class PhotoTransferApp(QMainWindow):
                 self.source_list.addItem(normalized_folder)
 
     def init_ui(self):
-        self.setWindowTitle("Gestionnaire de transfert de photos")
-        self.setWindowIcon(QIcon('icons/folder.png'))
+        self.setWindowTitle("PixelGuard")
+        self.setWindowIcon(QIcon('icons/PixelGuard.png'))
         self.setGeometry(200, 200, 800, 600)
         self.central_widget = QWidget()
         self.main_layout = QVBoxLayout(self.central_widget)
 
-        # Groupe pour les paramètres de dossier
+        self.init_folder_group()
+        self.init_filter_group()
+        self.init_source_group()
+        self.init_transfer_controls()
+
+        self.splitter = QSplitter(Qt.Vertical)
+        top_widget = QWidget()
+        top_layout = QVBoxLayout(top_widget)
+        top_layout.addWidget(self.folder_group)
+        top_layout.addWidget(self.filter_group)
+        top_layout.addWidget(self.source_group)
+        
+        bottom_widget = QWidget()
+        bottom_layout = QVBoxLayout(bottom_widget)
+        bottom_layout.addLayout(self.transfer_layout)
+        bottom_layout.addWidget(self.log_area)
+        
+        self.splitter.addWidget(top_widget)
+        self.splitter.addWidget(bottom_widget)
+        
+        self.main_layout.addWidget(self.splitter)
+        self.setCentralWidget(self.central_widget)
+
+    def init_folder_group(self):
         self.folder_group = QGroupBox("Dossier cible")
         folder_layout = QVBoxLayout()
         
@@ -239,11 +261,10 @@ class PhotoTransferApp(QMainWindow):
         folder_layout.addWidget(self.change_folder_button)
         self.folder_group.setLayout(folder_layout)
 
-        # Groupe pour les filtres et la sélection du mois
+    def init_filter_group(self):
         self.filter_group = QGroupBox("Filtres et période")
         filter_and_month_layout = QHBoxLayout()
 
-        # Disposition pour les filtres (Photos, Vidéos)
         filter_layout = QVBoxLayout()
         self.photo_checkbox = QCheckBox("Photos")
         self.photo_checkbox.setChecked(True)
@@ -252,7 +273,6 @@ class PhotoTransferApp(QMainWindow):
         filter_layout.addWidget(self.photo_checkbox)
         filter_layout.addWidget(self.video_checkbox)
 
-        # Disposition pour les sélecteurs (Mois et Nom du dossier)
         month_selector_layout = QVBoxLayout()
         self.month_selector = QComboBox()
         self.populate_month_selector()
@@ -261,15 +281,13 @@ class PhotoTransferApp(QMainWindow):
         month_selector_layout.addWidget(self.month_selector)
         month_selector_layout.addWidget(self.folder_name_input)
 
-        # Ajouter les deux dispositions au conteneur principal avec un espace entre les deux
         filter_and_month_layout.addLayout(filter_layout)
-        filter_and_month_layout.addStretch()  # Ajout d'un espace flexible
+        filter_and_month_layout.addStretch()
         filter_and_month_layout.addLayout(month_selector_layout)
 
-        # Ajouter le conteneur principal au layout parent
         self.filter_group.setLayout(filter_and_month_layout)
 
-        # Groupe pour les dossiers source
+    def init_source_group(self):
         self.source_group = QGroupBox("Dossiers source")
         source_layout = QVBoxLayout()
         self.source_list = QListWidget()
@@ -286,19 +304,8 @@ class PhotoTransferApp(QMainWindow):
         source_layout.addLayout(source_buttons_layout)
         self.source_group.setLayout(source_layout)
 
-        # Création du splitter
-        self.splitter = QSplitter(Qt.Vertical)
-        top_widget = QWidget()
-        top_layout = QVBoxLayout(top_widget)
-        top_layout.addWidget(self.folder_group)
-        top_layout.addWidget(self.filter_group)
-        top_layout.addWidget(self.source_group)
-        
-        bottom_widget = QWidget()
-        bottom_layout = QVBoxLayout(bottom_widget)
-        
-        # Contrôles de transfert (sans GroupBox)
-        transfer_layout = QVBoxLayout()
+    def init_transfer_controls(self):
+        self.transfer_layout = QVBoxLayout()
         
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(False)
@@ -316,7 +323,6 @@ class PhotoTransferApp(QMainWindow):
                 background-color: #3b7a33;
             }
         """)
-
         self.stop_button = QPushButton("Arrêter le transfert")
         self.stop_button.setStyleSheet("""
             QPushButton {
@@ -333,21 +339,12 @@ class PhotoTransferApp(QMainWindow):
         control_buttons_layout.addWidget(self.start_button)
         control_buttons_layout.addWidget(self.stop_button)
         
-        transfer_layout.addWidget(self.progress_bar)
-        transfer_layout.addLayout(control_buttons_layout)
+        self.transfer_layout.addWidget(self.progress_bar)
+        self.transfer_layout.addLayout(control_buttons_layout)
         
-        self.log_area = QTextEdit()
+        self.log_area = QPlainTextEdit()
         self.log_area.setReadOnly(True)
         
-        bottom_layout.addLayout(transfer_layout)
-        bottom_layout.addWidget(self.log_area)
-        
-        self.splitter.addWidget(top_widget)
-        self.splitter.addWidget(bottom_widget)
-        
-        self.main_layout.addWidget(self.splitter)
-        
-        # Connexions des signaux
         self.add_source_button.clicked.connect(self.open_device_browser)
         self.remove_source_button.clicked.connect(self.remove_source_folder)
         self.start_button.clicked.connect(self.start_transfer)
@@ -357,29 +354,6 @@ class PhotoTransferApp(QMainWindow):
         self.month_selector.currentIndexChanged.connect(self.update_selected_month)
         
         self.stop_button.setEnabled(False)
-        
-        self.setCentralWidget(self.central_widget)
-
-    def load_settings(self):
-        try:
-            with open(self.settings_file, 'r') as f:
-                settings = json.load(f)
-                self.target_folder = settings.get('target_folder', self.target_base_path)
-                self.source_folders = settings.get('source_folders', [])
-                self.filter_photos = settings.get('filter_photos', True)
-                self.filter_videos = settings.get('filter_videos', True)
-        except FileNotFoundError:
-            pass
-
-    def save_settings(self):
-        settings = {
-            'target_folder': self.target_folder,
-            'source_folders': self.source_folders,
-            'filter_photos': self.filter_photos,
-            'filter_videos': self.filter_videos
-        }
-        with open(self.settings_file, 'w') as f:
-            json.dump(settings, f)
 
     def show_context_menu(self, position):
         menu = QMenu()
@@ -393,8 +367,6 @@ class PhotoTransferApp(QMainWindow):
         elif action == clear_action:
             self.source_list.clear()
             self.source_folders = []
-            self.save_settings()
-
 
     def populate_month_selector(self):
         self.months = [
@@ -413,13 +385,11 @@ class PhotoTransferApp(QMainWindow):
 
     def update_folder_name_input(self):
         month_name = self.months[self.selected_month.month - 1]
-
         self.folder_name_input.setText(f"{self.selected_month.year} {month_name}")
 
     def update_filters(self):
         self.filter_photos = self.photo_checkbox.isChecked()
         self.filter_videos = self.video_checkbox.isChecked()
-        self.save_settings()
 
     def change_target_folder(self):
         new_folder = QFileDialog.getExistingDirectory(self, "Sélectionner le dossier cible", self.target_folder)
@@ -448,10 +418,6 @@ class PhotoTransferApp(QMainWindow):
             self.source_folders = [(f, p) for f, p in self.source_folders if f != folder]
             self.source_list.takeItem(self.source_list.row(current_item))
 
-    def log(self, message):
-        self.log_area.append(message)
-        self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum())
-
     def start_transfer(self):
         self.transfer_thread = TransferThread(self)
         self.transfer_thread.log.connect(self.log)
@@ -475,7 +441,7 @@ class PhotoTransferApp(QMainWindow):
     def list_files(self, source_folder):
         try:
             cmd_list_files = f'{self.adb_path} shell ls "{source_folder}"'
-            files = subprocess.check_output(cmd_list_files, shell=True).decode().splitlines()
+            files = subprocess.check_output(cmd_list_files, shell=True, creationflags=subprocess.CREATE_NO_WINDOW).decode().splitlines()
             return files
         except subprocess.CalledProcessError:
             return []
@@ -495,7 +461,7 @@ class PhotoTransferApp(QMainWindow):
         if not os.path.exists(target_file_path):
             cmd_pull = f'{self.adb_path} pull "{source_folder}/{file}" "{target_file_path}"'
             try:
-                subprocess.run(cmd_pull, shell=True, check=True)
+                subprocess.run(cmd_pull, shell=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
                 self.log(f"Transféré : {file}")
             except subprocess.CalledProcessError as e:
                 self.log(f"Erreur lors du transfert de {file}: {e}")
