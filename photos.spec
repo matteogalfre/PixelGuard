@@ -4,7 +4,11 @@
 a = Analysis(
     ['photos.py'],
     pathex=[],
-    binaries=[('adb.exe', '.')],  
+    binaries=[
+        ('adb.exe', '.'),
+        ('AdbWinApi.dll', '.'),
+        ('AdbWinUsbApi.dll', '.')
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
