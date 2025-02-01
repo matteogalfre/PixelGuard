@@ -4,8 +4,7 @@
 a = Analysis(
     ['photos.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
+    binaries=[('adb.exe', '.')],  
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

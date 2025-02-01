@@ -108,10 +108,13 @@ class TransferThread(QThread):
 class PhotoTransferApp(QMainWindow):
     def __init__(self):
         super().__init__()
+        if getattr(sys, 'frozen', False):
+            self.adb_path = os.path.join(sys._MEIPASS, 'adb.exe')
+        else:
+            self.adb_path = 'adb.exe'
         self.target_base_path = os.path.expanduser('~\\Desktop\\Photos Samsung Matt\\1 un\\2 deux')
         self.target_folder = self.target_base_path
         self.source_folders = [('/sdcard/DCIM/Camera', 'standard')]
-        self.adb_path = 'adb'
         self.selected_month = datetime.now()
         self.filter_photos = True
         self.filter_videos = True
@@ -205,7 +208,12 @@ class PhotoTransferApp(QMainWindow):
 
     def is_android_connected(self):
         try:
-            result = subprocess.run([self.adb_path, 'get-state'], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            result = subprocess.run(
+                [self.adb_path, 'get-state'],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
             return 'device' in result.stdout
         except Exception as e:
             self.log(f"Erreur lors de la vérification de la connexion Android: {e}")
