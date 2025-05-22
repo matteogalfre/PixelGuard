@@ -1,29 +1,29 @@
 # 🔒 PixelGuard
 
-Transférez vos photos de smartphone vers votre PC en toute simplicité et sécurité. Fini les services cloud, place à la sauvegarde instantanée et confidentielle.
+Transfer your smartphone photos to your PC easily and securely. Gone are the days of cloud services, replaced by instant, confidential backup.
 
-## Fonctionnalités
+## Features
 
-- Transférez vos photos et vidéos de votre smartphone vers votre PC.
-- Filtrez les photos et vidéos par mois.
-- Interface simple et intuitive.
-- Transfert sécurisé et privé.
+- Transfer photos and videos from your smartphone to your PC.
+- Filter photos and videos by month.
+- Simple, intuitive interface.
+- Secure, private transfer.
 
 ## Installation
 
-- Téléchargez l'installateur dans Output/.
-- Lancez l'installateur et suivez les instructions.
+- Download the installer from Output/.
+- Run the installer and follow the instructions.
 
-## Utilisation
-- Connectez votre smartphone Android à votre PC.
-- Ouvrez PixelGuard.
-- Sélectionnez le dossier de destination pour enregistrer vos photos.
-- Choisissez les filtres pour les photos/vidéos et le mois à sauvegarder.
-- Cliquez sur "Lancer le transfert".
-## Pré-requis
-- Système d'exploitation Windows.
-- ADB (Android Debug Bridge) installé sur votre PC.
-- Débogage USB activé sur votre smartphone.
+## Use
+- Connect your Android smartphone to your PC.
+- Open PixelGuard.
+- Select the destination folder to save your photos.
+- Choose the filters for photos/videos and the month to save.
+- Click on “Start transfer”.
+## Requirements
+- Windows operating system.
+- ADB (Android Debug Bridge) installed on your PC.
+- USB debugging enabled on your smartphone.
 
-## Licence
-Ce projet est sous licence MIT.
+## License
+This project is licensed under the MIT License.
