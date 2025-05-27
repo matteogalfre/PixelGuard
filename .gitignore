@@ -1,0 +1,33 @@
+# Fichiers de build / dist générés par PyInstaller
+build/
+dist/
+*.spec
+
+testios.py
+
+# Fichier exécutable compilé
+*.exe
+
+# Paramètres de l'app
+app_settings.json
+
+# Dossiers système ou temporaires
+__pycache__/
+*.pyc
+*.pyo
+*.log
+
+# VS Code / IDE
+.vscode/
+.idea/
+
+# Fichiers Inno Setup compilés
+Output/
+*.iss~
+
+# Icône compilée si pas utile dans Git
+*.ico
+
+# Fichier d'environnement Python
+.env
+.venv/
