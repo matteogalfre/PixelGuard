@@ -112,9 +112,9 @@ class PhotoTransferApp(QMainWindow):
             self.adb_path = os.path.join(sys._MEIPASS, 'adb.exe')
         else:
             self.adb_path = 'adb.exe'
-        self.target_base_path = os.path.expanduser('~\\Desktop')
+        self.target_base_path = os.path.expanduser('~\\Desktop\\Photos Samsung Matt\\1 un\\2 deux\\3 trois')
         self.target_folder = self.target_base_path
-        self.source_folders = [('/sdcard/DCIM/Camera', 'standard')]
+        self.source_folders = [('/sdcard/DCIM/Camera', 'standard'), ('/sdcard/Movies/AdobeLightroom', 'standard'), ('/sdcard/Pictures/AdobeLightroom', 'standard')]
         self.selected_month = datetime.now()
         self.filter_photos = True
         self.filter_videos = True
