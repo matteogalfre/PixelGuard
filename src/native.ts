@@ -75,6 +75,10 @@ function demo(): PgApi {
         .map(([p, size]) => ({ name: p.slice(prefix.length), size, dir: false }));
     },
     async mkdirs() { return true; },
+    async statFiles(paths) {
+      const lower = new Map([...remote.entries()].map(([p, n]) => [p.toLowerCase(), n]));
+      return paths.map((p) => lower.get(p.toLowerCase()) ?? -1);
+    },
     async testWrite() { await wait(200); return { ok: true }; },
     async speedTest(_dir, mb) {
       const total = mb * 1048576;

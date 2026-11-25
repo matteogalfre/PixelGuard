@@ -1,5 +1,7 @@
 import {
+  addToFolder,
   decide,
+  folderFor,
   folderState,
   humanBytes,
   joinPath,
@@ -71,6 +73,13 @@ export function stop(): void {
 
 function connect(pc: PcSettings, password: string) {
   return Pg.connect({ host: pc.host, share: pc.share, user: pc.user, password, encrypt: pc.encrypt });
+}
+
+/** Ajoute (ou corrige) un fichier dans l'état d'un dossier. */
+function upsertRemote(st: FolderState, f: { name: string; size: number }) {
+  const existing = st.byKey.get(variantKeyOf(f.name))?.find((x) => x.name.toLowerCase() === f.name.toLowerCase());
+  if (existing) existing.size = f.size;
+  else addToFolder(st, f);
 }
 
 const dirOf = (path: string) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '');
@@ -156,6 +165,8 @@ export type Comparison = {
   renamed: number;
   /** Fichiers des dossiers visés qui ne viennent pas de ce téléphone (autre appareil, copie à la main). */
   extraOnPc: number;
+  /** Fichiers que la liste du PC montrait mal (absents ou taille périmée), vérifiés un par un. */
+  checkedOneByOne: number;
   folders: string[];
 };
 
@@ -210,7 +221,9 @@ async function compareWithPc(opts: Selection, onDetail: (d: string) => void): Pr
 
   let already = 0;
   let alreadyBytes = 0;
+  let checkedOneByOne = 0;
   const fresh: MediaItem[] = [];
+  const doubtful: { m: MediaItem; path: string }[] = [];
   for (const m of items) {
     const k = index[m.id];
     if (k && k.size === m.size) {
@@ -222,8 +235,45 @@ async function compareWithPc(opts: Selection, onDetail: (d: string) => void): Pr
         match(k.path);
         continue;
       }
+      // Envoyé d'après l'index, mais absent de la liste : on demande au fichier lui-même.
+      doubtful.push({ m, path: k.path });
+      continue;
     }
     fresh.push(m);
+  }
+  if (doubtful.length) {
+    const sizes = await Pg.statFiles(doubtful.map((d) => d.path));
+    doubtful.forEach(({ m, path }, i) => {
+      if (sizes[i] === m.size) {
+        already++;
+        alreadyBytes += m.size;
+        checkedOneByOne++;
+        match(path);
+        const st = states.get(dirOf(path));
+        if (st) upsertRemote(st, { name: baseOf(path), size: m.size });
+      } else {
+        fresh.push(m);
+      }
+    });
+  }
+  // Même nom mais autre taille dans la liste : Windows a pu y laisser une taille périmée.
+  // On relit la vraie taille avant de conclure à un autre fichier (et de l'envoyer en « nom (1) »).
+  const recheck: { f: { name: string; size: number }; path: string }[] = [];
+  for (const m of fresh) {
+    const f = folderFor(m, opts.sorting, lang);
+    const same = states.get(joinPath(pc.folder, f))?.byKey.get(variantKeyOf(sanitizeSegment(m.name)));
+    if (same && !same.some((x) => x.size === m.size)) {
+      for (const x of same) recheck.push({ f: x, path: joinPath(pc.folder, f, x.name) });
+    }
+  }
+  if (recheck.length) {
+    const sizes = await Pg.statFiles(recheck.map((r) => r.path));
+    recheck.forEach((r, i) => {
+      if (sizes[i] >= 0 && sizes[i] !== r.f.size) {
+        r.f.size = sizes[i];
+        checkedOneByOne++;
+      }
+    });
   }
 
   const folders = new Map<string, FolderState>();
@@ -247,7 +297,7 @@ async function compareWithPc(opts: Selection, onDetail: (d: string) => void): Pr
   before.forEach((count, d) => {
     extraOnPc += Math.max(0, count - (matched.get(d)?.size ?? 0));
   });
-  return { index, entries, uploads, already, alreadyBytes, renamed, extraOnPc, folders: targets };
+  return { index, entries, uploads, already, alreadyBytes, renamed, extraOnPc, checkedOneByOne, folders: targets };
 }
 
 export type Preview = Omit<Comparison, 'index' | 'entries' | 'uploads'> & {
@@ -359,8 +409,16 @@ export async function runBackup(
             await Pg.upload(e.item.uri, target, e.item.size, id, sourceKey(e.item));
           } catch (err) {
             if (errorCode(err) !== 'EXISTS') throw err;
-            // Le dossier a changé depuis le listing (PixelGuard en USB, autre téléphone...).
+            // Ce nom est déjà pris sur le PC : si c'est ce fichier (même taille, lue sur le
+            // fichier lui-même), il est déjà là. Sinon on relit le dossier pour un nom libre.
+            const [onPc] = await Pg.statFiles([target]);
+            if (onPc === e.item.size) {
+              p.skipped++;
+              index[e.item.id] = { path: target, size: e.item.size };
+              return;
+            }
             const fresh = folderState((await Pg.list(joinPath(pc.folder, e.folder))).filter((x) => !x.dir));
+            upsertRemote(fresh, { name: e.remoteName, size: onPc });
             const d = decide(e.item.name, e.item.size, fresh);
             target = joinPath(pc.folder, e.folder, d.remoteName);
             if (d.action === 'skip') {

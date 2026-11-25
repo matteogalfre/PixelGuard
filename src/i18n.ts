@@ -1,14 +1,26 @@
 import { getLocales } from 'expo-localization';
 
-import type { Lang } from './logic';
+import { periodRange, type Lang, type Period } from './logic';
 
 const plural = (n: number, one: string, many: string) => (n > 1 ? many : one);
 
-/** Commande à coller dans un Terminal administrateur sur le PC Windows. */
-export const POWERSHELL =
-  '$d="$env:USERPROFILE\\Pictures\\PixelGuard"; md $d -Force >$null; ' +
-  'New-SmbShare -Name PixelGuard -Path $d -FullAccess "$env:USERDOMAIN\\$env:USERNAME"; ' +
-  'Get-NetFirewallRule -Group "@FirewallAPI.dll,-28502" | ? Profile -like "*Private*" | Enable-NetFirewallRule';
+/**
+ * Commande à coller dans PowerShell (ou Terminal) sur le PC Windows. Elle crée et partage
+ * `Images\PixelGuard`, ouvre le partage de fichiers sur le réseau privé, et peut être relancée
+ * sans erreur. Pas en administrateur ? Elle se relance toute seule avec la demande de Windows.
+ */
+export function powershell(done: string): string {
+  const script =
+    '$d="$env:USERPROFILE\\Pictures\\PixelGuard"; md $d -Force >$null; ' +
+    'if(-not(Get-SmbShare -Name PixelGuard -EA 0)){New-SmbShare -Name PixelGuard -Path $d -FullAccess "$env:USERDOMAIN\\$env:USERNAME" >$null}; ' +
+    'Get-NetFirewallRule -Group "@FirewallAPI.dll,-28502" | ? Profile -like "*Private*" | Enable-NetFirewallRule; ' +
+    `Write-Host "${done} $d" -ForegroundColor Green`;
+  return (
+    `$s='${script}'; ` +
+    'if(([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(544)){iex $s}' +
+    "else{Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-EncodedCommand',([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($s)))}"
+  );
+}
 
 const fr = {
   demo: 'Démo navigateur : rien ne bouge vraiment',
@@ -93,15 +105,29 @@ const fr = {
   cmpRenamed: (n: number) => `${n} ${plural(n, 'porte', 'portent')} le nom d'un autre fichier déjà sur le PC : ${plural(n, 'il ira', 'ils iront')} en « nom (1) ».`,
   cmpExtra: (n: number) => `${n} ${plural(n, 'fichier', 'fichiers')} de ces dossiers ne ${plural(n, 'vient', 'viennent')} pas de ce téléphone (autre appareil ou copie à la main).`,
   cmpNotEncrypted: 'Ce transfert ne sera pas chiffré.',
+  cmpChecked: (n: number) => `${n} ${plural(n, 'fichier vérifié', 'fichiers vérifiés')} un par un : la liste du PC était incomplète ou pas à jour.`,
   cmpFailed: (m: string) => `Comparaison impossible : ${m}`,
   cmpOffline: 'PC hors ligne : la comparaison se fera au moment de sauvegarder.',
   more: (n: number) => `+${n}`,
+  custom: 'Perso…',
+  periodTitle: 'Période',
+  periodSub: 'Ce que tu veux sauvegarder, selon la date des photos et vidéos.',
+  shortcuts: 'Raccourcis',
+  lastN: (n: number) => `${n} derniers mois`,
+  years: 'Une année',
+  fromTo: 'De tel mois à tel mois',
+  from: 'De',
+  to: 'À',
+  periodCount: (n: number, size: string) => `${n} ${plural(n, 'fichier', 'fichiers')} · ${size}`,
+  apply: 'Valider',
+  periodRow: 'Période',
   whenLabel: 'Quand',
   periods: { all: 'Tout', thisMonth: 'Ce mois-ci', lastMonth: 'Mois dernier' } as Record<'all' | 'thisMonth' | 'lastMonth', string>,
   pickMonth: 'Ou un mois précis',
   monthLabel: (m: string, y: number) => `${m} ${y}`,
   encryptTitle: 'Chiffrer les transferts',
-  encryptHint: "Avec un PC Windows 10 ou 11, ça ne coûte rien de mesurable (AES matériel du téléphone). Avec un Mac, ça plafonne vers 90 Mo/s. À couper seulement chez toi, sur ton propre Wi-Fi, si tu veux gratter ces derniers Mo/s.",
+  encryptHint: "Chiffrer coûte un peu de débit : chaque paquet est chiffré par le téléphone puis déchiffré par le PC. Le téléphone suit sans peine (2 Go/s mesurés), c'est l'échange qui s'alourdit, et avec un Mac on plafonne vers 90 Mo/s. Chez toi, sur ton propre Wi-Fi, tu peux le couper pour aller au plus vite : les fichiers restent protégés contre toute modification en route.",
+  psDone: 'PixelGuard est prêt :',
   sourcesTitle: "D'où viennent les photos",
   sourcesSub: 'Choisis les albums du téléphone à sauvegarder. PixelGuard s’en souvient.',
   sources: 'Sources',
@@ -133,7 +159,7 @@ const fr = {
   pcSub: 'Trouvé en quelques secondes sur ton Wi-Fi.',
   prepTitle: 'Préparer le PC (une seule fois)',
   prepText:
-    'Sur le PC, ouvre Terminal en administrateur et colle cette ligne. Elle crée le dossier partagé PixelGuard dans Images (le même que PixelGuard en USB) et ouvre le partage de fichiers sur ton réseau privé.',
+    "Sur le PC : touche Windows + X, ouvre « Terminal » (ou PowerShell), colle cette ligne et fais Entrée. Si Windows demande « Voulez-vous autoriser… », réponds Oui : la commande se relance d'elle-même en administrateur. Elle crée le dossier partagé PixelGuard dans Images (le même que PixelGuard en USB) et ouvre le partage de fichiers sur ton réseau privé.",
   prepManual: 'Ou à la main : clic droit sur un dossier › Propriétés › Partage › Partager.',
   copy: 'Copier',
   copied: 'Copié',
@@ -263,15 +289,29 @@ const en: Dict = {
   cmpRenamed: (n) => `${n} ${plural(n, 'has', 'have')} the name of another file already on the PC: saved as "name (1)".`,
   cmpExtra: (n) => `${n} ${plural(n, 'file', 'files')} in these folders ${plural(n, "doesn't", "don't")} come from this phone (another device or copied by hand).`,
   cmpNotEncrypted: 'This transfer will not be encrypted.',
+  cmpChecked: (n) => `${n} ${plural(n, 'file', 'files')} checked one by one: the PC's list was incomplete or out of date.`,
   cmpFailed: (m) => `Couldn't compare: ${m}`,
   cmpOffline: 'PC offline: the comparison will happen when you back up.',
   more: (n) => `+${n}`,
+  custom: 'Custom…',
+  periodTitle: 'Period',
+  periodSub: 'What you want to back up, by the date of the photos and videos.',
+  shortcuts: 'Shortcuts',
+  lastN: (n) => `Last ${n} months`,
+  years: 'A year',
+  fromTo: 'From one month to another',
+  from: 'From',
+  to: 'To',
+  periodCount: (n, size) => `${n} ${plural(n, 'file', 'files')} · ${size}`,
+  apply: 'Apply',
+  periodRow: 'Period',
   whenLabel: 'When',
   periods: { all: 'All', thisMonth: 'This month', lastMonth: 'Last month' },
   pickMonth: 'Or a specific month',
   monthLabel: (m, y) => `${m} ${y}`,
   encryptTitle: 'Encrypt transfers',
-  encryptHint: "With a Windows 10 or 11 PC it costs nothing measurable (the phone's hardware AES). With a Mac it tops out around 90 MB/s. Only turn it off at home, on your own Wi-Fi, if you want those last MB/s.",
+  encryptHint: "Encryption costs some speed: the phone encrypts every packet and the PC decrypts it. The phone keeps up easily (2 GB/s measured), the exchange just gets heavier, and with a Mac it tops out around 90 MB/s. At home, on your own Wi-Fi, you can turn it off for the fastest copies: files stay protected against any change on the way.",
+  psDone: 'PixelGuard is ready:',
   sourcesTitle: 'Where photos come from',
   sourcesSub: 'Pick the phone albums to back up. PixelGuard remembers.',
   sources: 'Sources',
@@ -303,7 +343,7 @@ const en: Dict = {
   pcSub: 'Found in a few seconds on your Wi-Fi.',
   prepTitle: 'Prepare the PC (once)',
   prepText:
-    'On the PC, open Terminal as administrator and paste this line. It creates the PixelGuard shared folder in Pictures (the same one PixelGuard uses over USB) and allows file sharing on your private network.',
+    "On the PC: press Windows + X, open \"Terminal\" (or PowerShell), paste this line and press Enter. If Windows asks \"Do you want to allow…\", say Yes: the command restarts itself as administrator. It creates the PixelGuard shared folder in Pictures (the same one PixelGuard uses over USB) and allows file sharing on your private network.",
   prepManual: 'Or by hand: right-click a folder › Properties › Sharing › Share.',
   copy: 'Copy',
   copied: 'Copied',
@@ -364,4 +404,32 @@ export function ago(ms: number): string {
   const d = Math.round(h / 24);
   if (d === 1) return fr ? 'hier' : 'yesterday';
   return fr ? `il y a ${d} jours` : `${d} days ago`;
+}
+
+const SHORT: Record<Lang, string[]> = {
+  fr: ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'],
+  en: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+};
+
+/** « oct. 2026 » : un mois écrit court (`k` vaut 202610). */
+export function shortMonth(k: number): string {
+  return `${SHORT[lang][(k % 100) - 1]} ${Math.floor(k / 100)}`;
+}
+
+/** Le nom à afficher d'une période : « Ce mois-ci », « 3 derniers mois », « juil. 2026 → sept. 2026 »... */
+export function periodLabel(p: Period): string {
+  switch (p.kind) {
+    case 'all':
+    case 'thisMonth':
+    case 'lastMonth':
+      return t.periods[p.kind];
+    case 'lastMonths':
+      return t.lastN(p.n);
+    case 'year':
+      return String(p.year);
+    default: {
+      const r = periodRange(p)!;
+      return r[0] === r[1] ? shortMonth(r[0]) : `${shortMonth(r[0])} → ${shortMonth(r[1])}`;
+    }
+  }
 }
