@@ -1,0 +1,131 @@
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import { Pressable, ScrollView, Text, View } from 'react-native';
+
+import { lang, t } from '../i18n';
+import { humanBytes, MONTHS, type Kinds } from '../logic';
+import { useApp } from '../state';
+import { C, F, GRADIENT, Header, Screen, Segmented, t as ty, tap, Thumb } from '../ui/kit';
+
+export default function Sources() {
+  const { albums, selected, setSelected, kinds, setKinds, stats, period, setPeriod } = useApp();
+  const toggle = (id: string) => {
+    tap();
+    setSelected(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+  };
+  const allOn = albums.length > 0 && albums.every((a) => selected.includes(a.id));
+
+  return (
+    <Screen>
+      <Header title={t.sourcesTitle} subtitle={t.sourcesSub} />
+
+      <Text style={ty.label}>{t.kindsLabel}</Text>
+      <Segmented<Kinds>
+        options={(['all', 'photos', 'videos'] as Kinds[]).map((k) => ({ value: k, label: t.kinds[k] }))}
+        value={kinds}
+        onChange={setKinds}
+      />
+
+      <Text style={[ty.label, { marginTop: 4 }]}>{t.whenLabel}</Text>
+      <Segmented<string>
+        options={(['all', 'thisMonth', 'lastMonth'] as const).map((k) => ({ value: k, label: t.periods[k] }))}
+        value={period.kind}
+        onChange={(k) => {
+          if (k === 'all' || k === 'thisMonth' || k === 'lastMonth') setPeriod({ kind: k });
+        }}
+      />
+      {stats?.months.length ? (
+        <>
+          <Text style={ty.small}>{t.pickMonth}</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+            {stats.months.map((mo) => {
+              const on = period.kind === 'month' && period.year === mo.year && period.month === mo.month;
+              return (
+                <Pressable
+                  key={`${mo.year}-${mo.month}`}
+                  onPress={() => {
+                    tap();
+                    setPeriod({ kind: 'month', year: mo.year, month: mo.month });
+                  }}
+                  style={{
+                    paddingHorizontal: 14, paddingVertical: 10, borderRadius: 16, borderWidth: 1,
+                    borderColor: on ? C.cyan : C.line, backgroundColor: on ? 'rgba(34,195,240,0.12)' : C.surface,
+                  }}
+                >
+                  <Text style={{ color: on ? C.cyan : C.text, fontFamily: F.semi }}>
+                    {t.monthLabel(MONTHS[lang][mo.month - 1], mo.year)}
+                  </Text>
+                  <Text style={ty.small}>
+                    {mo.count} · {humanBytes(mo.bytes, lang)}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </>
+      ) : null}
+
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
+        <Text style={ty.label}>{t.albumsLabel}</Text>
+        <Pressable
+          onPress={() => {
+            tap();
+            setSelected(allOn ? [] : albums.map((a) => a.id));
+          }}
+          hitSlop={8}
+        >
+          <Text style={[ty.small, { color: C.cyan, fontFamily: F.semi }]}>{allOn ? t.none : t.all}</Text>
+        </Pressable>
+      </View>
+      {stats ? (
+        <Text style={ty.small}>
+          {stats.total} · {humanBytes(stats.totalBytes, lang)}
+        </Text>
+      ) : null}
+
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
+        {albums.map((a) => {
+          const on = selected.includes(a.id);
+          return (
+            <Pressable
+              key={a.id}
+              onPress={() => toggle(a.id)}
+              style={({ pressed }) => ({
+                width: '48%',
+                aspectRatio: 1,
+                borderRadius: 22,
+                overflow: 'hidden',
+                borderWidth: 2,
+                borderColor: on ? C.cyan : 'transparent',
+                opacity: on ? 1 : 0.55,
+                transform: [{ scale: pressed ? 0.97 : 1 }],
+              })}
+            >
+              <Thumb uri={a.cover} size="100%" radius={0} />
+              <LinearGradient
+                colors={['transparent', 'rgba(0,0,0,0.85)']}
+                style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: 12, paddingTop: 40 }}
+              >
+                <Text style={{ color: C.text, fontFamily: F.bold, fontSize: 15 }} numberOfLines={1}>
+                  {a.name || '—'}
+                </Text>
+                <Text style={[ty.small, { color: 'rgba(255,255,255,0.7)' }]} numberOfLines={1}>
+                  {a.count} · {humanBytes(a.bytes, lang)}
+                </Text>
+              </LinearGradient>
+              <View style={{ position: 'absolute', top: 10, right: 10 }}>
+                {on ? (
+                  <LinearGradient colors={GRADIENT} style={{ width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' }}>
+                    <MaterialCommunityIcons name="check" size={18} color="#041018" />
+                  </LinearGradient>
+                ) : (
+                  <View style={{ width: 28, height: 28, borderRadius: 14, borderWidth: 2, borderColor: 'rgba(255,255,255,0.7)' }} />
+                )}
+              </View>
+            </Pressable>
+          );
+        })}
+      </View>
+    </Screen>
+  );
+}

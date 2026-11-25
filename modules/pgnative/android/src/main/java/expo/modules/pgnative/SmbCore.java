@@ -1,0 +1,489 @@
+package expo.modules.pgnative;
+
+import com.hierynomus.msdtyp.AccessMask;
+import com.hierynomus.mserref.NtStatus;
+import com.hierynomus.msfscc.FileAttributes;
+import com.hierynomus.msfscc.fileinformation.FileIdBothDirectoryInformation;
+import com.hierynomus.msfscc.fileinformation.FileStandardInformation;
+import com.hierynomus.mssmb2.SMB2CreateDisposition;
+import com.hierynomus.mssmb2.SMB2ImpersonationLevel;
+import com.hierynomus.mssmb2.SMB2ShareAccess;
+import com.hierynomus.mssmb2.SMBApiException;
+import com.hierynomus.smbj.SmbConfig;
+import com.hierynomus.smbj.session.Session;
+import com.hierynomus.smbj.share.DiskShare;
+import com.hierynomus.smbj.share.File;
+import com.hierynomus.smbj.share.NamedPipe;
+import com.hierynomus.smbj.share.PipeShare;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Le cœur SMB en Java pur (sans Android), testable sur un ordinateur : envoi en flux continu,
+ * relecture MD5, liste des dossiers partagés (SRVSVC) et nom NetBIOS d'un PC.
+ */
+public final class SmbCore {
+  private SmbCore() {}
+
+  /** Taille d'une écriture SMB : 1 Mo, ou moins si le PC l'impose. */
+  public static final int CHUNK = 1 << 20;
+  /** Écritures envoyées sans attendre la réponse du PC, par fichier. */
+  public static final int DEPTH = 4;
+
+  public interface Progress {
+    void onBytes(long done);
+  }
+
+  public interface Cancel {
+    boolean get();
+  }
+
+  public static final class Exists extends IOException {
+    public Exists() {
+      super("Déjà sur le PC sous ce nom");
+    }
+  }
+
+  public static final class Cancelled extends IOException {
+    public Cancelled() {
+      super("Arrêté");
+    }
+  }
+
+  /** `encrypt` : demander le chiffrement SMB 3 (AES) ; la signature reste de toute façon. */
+  public static SmbConfig config(boolean encrypt) {
+    return SmbConfig.builder()
+        .withSecurityProvider(new HybridSecurityProvider())
+        .withTimeout(60, TimeUnit.SECONDS)
+        .withSoTimeout(90, TimeUnit.SECONDS)
+        .withBufferSize(CHUNK)
+        .withDfsEnabled(false)
+        // Chiffre tout le contenu en SMB 3 (AES). Sans ça, les fichiers sont seulement signés :
+        // personne ne peut les modifier en route, mais tout le monde sur le réseau peut les lire.
+        .withEncryptData(encrypt)
+        .build();
+  }
+
+  public static String smbPath(String path) {
+    String p = path.replace('/', '\\');
+    while (p.startsWith("\\")) p = p.substring(1);
+    while (p.endsWith("\\")) p = p.substring(0, p.length() - 1);
+    return p;
+  }
+
+  static boolean notFound(SMBApiException e) {
+    NtStatus st = e.getStatus();
+    return st == NtStatus.STATUS_OBJECT_NAME_NOT_FOUND || st == NtStatus.STATUS_OBJECT_PATH_NOT_FOUND
+        || st == NtStatus.STATUS_NO_SUCH_FILE || st == NtStatus.STATUS_NOT_FOUND;
+  }
+
+  /** Crée chaque niveau sans demander avant s'il existe : un aller-retour par niveau. */
+  public static void mkdirs(DiskShare share, String path) {
+    String current = "";
+    for (String part : smbPath(path).split("\\\\")) {
+      if (part.isEmpty()) continue;
+      current = current.isEmpty() ? part : current + "\\" + part;
+      try {
+        share.mkdir(current);
+      } catch (SMBApiException e) {
+        if (e.getStatus() != NtStatus.STATUS_OBJECT_NAME_COLLISION) throw e;
+      }
+    }
+  }
+
+  /** Contenu d'un dossier (vide s'il n'existe pas encore). */
+  public static List<FileIdBothDirectoryInformation> list(DiskShare share, String dir) {
+    try {
+      List<FileIdBothDirectoryInformation> out = new ArrayList<>();
+      for (FileIdBothDirectoryInformation f : share.list(smbPath(dir))) {
+        String n = f.getFileName();
+        if (!".".equals(n) && !"..".equals(n)) out.add(f);
+      }
+      return out;
+    } catch (SMBApiException e) {
+      if (notFound(e)) return new ArrayList<>();
+      throw e;
+    }
+  }
+
+  private static int readChunk(InputStream in, byte[] buf, int max) throws IOException {
+    int filled = 0;
+    while (filled < max) {
+      int n = in.read(buf, filled, max - filled);
+      if (n < 0) break;
+      filled += n;
+    }
+    return filled;
+  }
+
+  private static long await(Future<Long> f) throws IOException {
+    try {
+      Long n = f.get(120, TimeUnit.SECONDS);
+      return n == null ? 0 : n;
+    } catch (java.util.concurrent.ExecutionException e) {
+      Throwable c = e.getCause();
+      if (c instanceof IOException) throw (IOException) c;
+      if (c instanceof RuntimeException) throw (RuntimeException) c;
+      throw new IOException(c);
+    } catch (java.util.concurrent.TimeoutException e) {
+      throw new IOException("Le PC ne répond plus");
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new Cancelled();
+    }
+  }
+
+  /**
+   * Écrit `in` sous « target.part » en gardant DEPTH écritures en vol (le Wi-Fi ne reste jamais
+   * à vide en attendant les accusés de réception), puis renomme en « target ». Si `keep` est
+   * faux, le fichier est effacé à la fin (test de vitesse). Renvoie le nombre d'octets écrits.
+   */
+  public static long upload(DiskShare share, InputStream in, String target, long expected, int maxWrite,
+                            boolean keep, Progress progress, Cancel cancel) throws IOException {
+    int chunk = Math.max(4096, Math.min(CHUNK, maxWrite));
+    String finalPath = smbPath(target);
+    String part = finalPath + ".part";
+    File file = share.openFile(
+        part,
+        EnumSet.of(AccessMask.GENERIC_WRITE, AccessMask.DELETE),
+        EnumSet.of(FileAttributes.FILE_ATTRIBUTE_NORMAL),
+        SMB2ShareAccess.ALL,
+        SMB2CreateDisposition.FILE_OVERWRITE_IF,
+        null);
+    boolean ok = false;
+    long issued = 0;
+    long acked = 0;
+    // DEPTH+1 tampons : on remplit le suivant pendant que les DEPTH autres sont en vol.
+    byte[][] buffers = new byte[DEPTH + 1][chunk];
+    ArrayDeque<Future<Long>> inflight = new ArrayDeque<>();
+    ArrayDeque<Integer> lengths = new ArrayDeque<>();
+    int slot = 0;
+    try {
+      while (true) {
+        if (cancel.get()) throw new Cancelled();
+        byte[] buf = buffers[slot];
+        slot = (slot + 1) % buffers.length;
+        int n = readChunk(in, buf, chunk);
+        if (n <= 0) break;
+        while (inflight.size() >= DEPTH) {
+          long w = await(inflight.poll());
+          int len = lengths.poll();
+          if (w != len) throw new IOException("Écriture incomplète sur le PC");
+          acked += w;
+          progress.onBytes(acked);
+        }
+        inflight.add(file.writeAsync(buf, issued, 0, n));
+        lengths.add(n);
+        issued += n;
+      }
+      while (!inflight.isEmpty()) {
+        long w = await(inflight.poll());
+        int len = lengths.poll();
+        if (w != len) throw new IOException("Écriture incomplète sur le PC");
+        acked += w;
+        progress.onBytes(acked);
+      }
+      if (expected >= 0 && acked != expected) {
+        throw new IOException("Copie incomplète (" + acked + " sur " + expected + " octets)");
+      }
+      if (keep) {
+        try {
+          file.rename(finalPath, false);
+        } catch (SMBApiException e) {
+          if (e.getStatus() == NtStatus.STATUS_OBJECT_NAME_COLLISION) throw new Exists();
+          throw e;
+        }
+        ok = true;
+      }
+    } finally {
+      if (!ok) {
+        try {
+          file.deleteOnClose();
+        } catch (Exception ignored) {
+        }
+      }
+      try {
+        file.close();
+      } catch (Exception ignored) {
+      }
+    }
+    return acked;
+  }
+
+  public static String md5(InputStream in, Cancel cancel) throws IOException {
+    MessageDigest digest;
+    try {
+      digest = MessageDigest.getInstance("MD5");
+    } catch (NoSuchAlgorithmException e) {
+      throw new IOException(e);
+    }
+    byte[] buf = new byte[CHUNK];
+    while (true) {
+      if (cancel.get()) throw new Cancelled();
+      int n = in.read(buf);
+      if (n < 0) break;
+      digest.update(buf, 0, n);
+    }
+    return hex(digest.digest());
+  }
+
+  /**
+   * MD5 de la copie du PC, ou null si elle n'existe pas. On lit exactement `size` octets : si la
+   * copie n'a pas cette taille, l'empreinte renvoyée ne peut pas correspondre.
+   */
+  public static String md5Remote(DiskShare share, String path, long size, int maxRead, Cancel cancel)
+      throws IOException {
+    File f;
+    try {
+      f = share.openFile(smbPath(path), EnumSet.of(AccessMask.GENERIC_READ), null,
+          SMB2ShareAccess.ALL, SMB2CreateDisposition.FILE_OPEN, null);
+    } catch (SMBApiException e) {
+      if (notFound(e)) return null;
+      throw e;
+    }
+    try {
+      long onPc = f.getFileInformation(FileStandardInformation.class).getEndOfFile();
+      if (onPc != size) return "taille:" + onPc;
+      MessageDigest digest = MessageDigest.getInstance("MD5");
+      byte[] buf = new byte[Math.max(4096, Math.min(CHUNK, maxRead))];
+      long offset = 0;
+      while (offset < size) {
+        if (cancel.get()) throw new Cancelled();
+        int want = (int) Math.min(buf.length, size - offset);
+        int n = f.read(buf, offset, 0, want);
+        if (n <= 0) return "court:" + offset;
+        digest.update(buf, 0, n);
+        offset += n;
+      }
+      return hex(digest.digest());
+    } catch (NoSuchAlgorithmException e) {
+      throw new IOException(e);
+    } finally {
+      try {
+        f.close();
+      } catch (Exception ignored) {
+      }
+    }
+  }
+
+  static String hex(byte[] bytes) {
+    StringBuilder sb = new StringBuilder();
+    for (byte b : bytes) sb.append(String.format("%02x", b));
+    return sb.toString();
+  }
+
+  /** Flux de `total` octets aléatoires (le test de vitesse n'a rien à lire sur le téléphone). */
+  public static InputStream noise(long total) {
+    final byte[] block = new byte[CHUNK];
+    new java.util.Random().nextBytes(block);
+    return new InputStream() {
+      long left = total;
+
+      @Override
+      public int read() {
+        if (left <= 0) return -1;
+        left--;
+        return block[(int) (left % block.length)] & 0xff;
+      }
+
+      @Override
+      public int read(byte[] b, int off, int len) {
+        if (left <= 0) return -1;
+        int n = (int) Math.min(len, Math.min(left, block.length));
+        System.arraycopy(block, 0, b, off, n);
+        left -= n;
+        return n;
+      }
+    };
+  }
+
+  // ------------------------------------------------------------ Liste des dossiers partagés
+
+  private static final byte[] SRVSVC = guid(0x4b324fc8, (short) 0x1670, (short) 0x01d3,
+      new byte[] {0x12, 0x78, 0x5a, 0x47, (byte) 0xbf, 0x6e, (byte) 0xe1, (byte) 0x88});
+  private static final byte[] NDR = guid(0x8a885d04, (short) 0x1ceb, (short) 0x11c9,
+      new byte[] {(byte) 0x9f, (byte) 0xe8, 0x08, 0x00, 0x2b, 0x10, 0x48, 0x60});
+  private static final int MAX_FRAG = 4280;
+
+  private static byte[] guid(int a, short b, short c, byte[] d) {
+    ByteBuffer bb = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN);
+    bb.putInt(a).putShort(b).putShort(c).put(d);
+    return bb.array();
+  }
+
+  private static void header(ByteBuffer b, int ptype, int fragLen, int callId) {
+    b.put((byte) 5).put((byte) 0).put((byte) ptype).put((byte) 3);
+    b.put(new byte[] {0x10, 0, 0, 0});
+    b.putShort((short) fragLen).putShort((short) 0).putInt(callId);
+  }
+
+  static byte[] bindPdu() {
+    ByteBuffer b = ByteBuffer.allocate(72).order(ByteOrder.LITTLE_ENDIAN);
+    header(b, 11, 72, 1);
+    b.putShort((short) MAX_FRAG).putShort((short) MAX_FRAG).putInt(0);
+    b.put((byte) 1).put((byte) 0).putShort((short) 0);
+    b.putShort((short) 0).put((byte) 1).put((byte) 0);
+    b.put(SRVSVC).putShort((short) 3).putShort((short) 0);
+    b.put(NDR).putInt(2);
+    return b.array();
+  }
+
+  static byte[] shareEnumRequest(String host) {
+    ByteBuffer s = ByteBuffer.allocate(64 + host.length() * 2 + 64).order(ByteOrder.LITTLE_ENDIAN);
+    String name = "\\\\" + host + "\0";
+    s.putInt(0x00020000);
+    s.putInt(name.length()).putInt(0).putInt(name.length());
+    for (char c : name.toCharArray()) s.putChar(c);
+    while (s.position() % 4 != 0) s.put((byte) 0);
+    s.putInt(1); // niveau 1 : nom, type, commentaire
+    s.putInt(1); // aiguillage de l'union
+    s.putInt(0x00020004); // pointeur vers le conteneur
+    s.putInt(0); // EntriesRead
+    s.putInt(0); // Buffer vide
+    s.putInt(-1); // PreferedMaximumLength
+    s.putInt(0); // ResumeHandle absent
+    int stubLen = s.position();
+    ByteBuffer b = ByteBuffer.allocate(24 + stubLen).order(ByteOrder.LITTLE_ENDIAN);
+    header(b, 0, 24 + stubLen, 2);
+    b.putInt(stubLen).putShort((short) 0).putShort((short) 15); // opnum 15 : NetrShareEnum
+    b.put(s.array(), 0, stubLen);
+    return b.array();
+  }
+
+  private static String readString(ByteBuffer b) {
+    b.getInt(); // max
+    b.getInt(); // offset
+    int actual = b.getInt();
+    byte[] raw = new byte[actual * 2];
+    b.get(raw);
+    while (b.position() % 4 != 0) b.get();
+    String s = new String(raw, StandardCharsets.UTF_16LE);
+    return s.endsWith("\0") ? s.substring(0, s.length() - 1) : s;
+  }
+
+  static List<String> parseShareEnum(byte[] stub) throws IOException {
+    ByteBuffer b = ByteBuffer.wrap(stub).order(ByteOrder.LITTLE_ENDIAN);
+    if (stub.length >= 4) {
+      int status = ByteBuffer.wrap(stub, stub.length - 4, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+      if (status != 0) throw new IOException("Le PC refuse de lister ses partages (" + status + ")");
+    }
+    List<String> out = new ArrayList<>();
+    b.getInt(); // niveau
+    b.getInt(); // aiguillage
+    if (b.getInt() == 0) return out;
+    b.getInt(); // EntriesRead
+    if (b.getInt() == 0) return out;
+    int count = b.getInt();
+    int[] nameRef = new int[count];
+    int[] type = new int[count];
+    int[] remarkRef = new int[count];
+    for (int i = 0; i < count; i++) {
+      nameRef[i] = b.getInt();
+      type[i] = b.getInt();
+      remarkRef[i] = b.getInt();
+    }
+    for (int i = 0; i < count; i++) {
+      String name = nameRef[i] != 0 ? readString(b) : "";
+      if (remarkRef[i] != 0) readString(b);
+      boolean disk = (type[i] & 0xff) == 0;
+      boolean special = (type[i] & 0x80000000) != 0;
+      if (disk && !special && !name.isEmpty() && !name.endsWith("$")) out.add(name);
+    }
+    return out;
+  }
+
+  /** Les dossiers partagés visibles par ce compte (sans C$, ADMIN$, IPC$...). */
+  public static List<String> listShares(Session session, String host) throws IOException {
+    PipeShare ipc = (PipeShare) session.connectShare("IPC$");
+    try {
+      NamedPipe pipe = ipc.open("srvsvc", SMB2ImpersonationLevel.Impersonation,
+          EnumSet.of(AccessMask.FILE_READ_DATA, AccessMask.FILE_WRITE_DATA, AccessMask.FILE_READ_ATTRIBUTES),
+          null, EnumSet.of(SMB2ShareAccess.FILE_SHARE_READ, SMB2ShareAccess.FILE_SHARE_WRITE),
+          SMB2CreateDisposition.FILE_OPEN, null);
+      try {
+        byte[] ack = pipe.transact(bindPdu());
+        if (ack.length < 4 || ack[2] != 12) throw new IOException("Liste des partages refusée");
+        byte[] frag = pipe.transact(shareEnumRequest(host));
+        ByteArrayOutputStream stub = new ByteArrayOutputStream();
+        for (int guard = 0; guard < 64; guard++) {
+          if (frag.length < 24) throw new IOException("Réponse trop courte");
+          if (frag[2] == 3) throw new IOException("Liste des partages refusée");
+          if (frag[2] != 2) throw new IOException("Réponse inattendue");
+          int fragLen = ByteBuffer.wrap(frag, 8, 2).order(ByteOrder.LITTLE_ENDIAN).getShort() & 0xffff;
+          int authLen = ByteBuffer.wrap(frag, 10, 2).order(ByteOrder.LITTLE_ENDIAN).getShort() & 0xffff;
+          int end = Math.min(frag.length, fragLen) - (authLen > 0 ? authLen + 8 : 0);
+          stub.write(frag, 24, end - 24);
+          if ((frag[3] & 0x02) != 0) break; // dernier fragment
+          byte[] next = new byte[MAX_FRAG + 64];
+          int n = pipe.read(next);
+          frag = Arrays.copyOf(next, Math.max(n, 0));
+        }
+        return parseShareEnum(stub.toByteArray());
+      } finally {
+        pipe.close();
+      }
+    } finally {
+      ipc.close();
+    }
+  }
+
+  // ------------------------------------------------------------ Nom NetBIOS (UDP 137)
+
+  /** Requête « node status » : le PC répond avec son nom (DESKTOP-XXXX). */
+  public static byte[] nbstatQuery(int txid) {
+    ByteBuffer b = ByteBuffer.allocate(50).order(ByteOrder.BIG_ENDIAN);
+    b.putShort((short) txid).putShort((short) 0).putShort((short) 1).putShort((short) 0)
+        .putShort((short) 0).putShort((short) 0);
+    b.put((byte) 0x20);
+    byte[] name = new byte[16];
+    name[0] = '*';
+    for (byte c : name) {
+      b.put((byte) ('A' + ((c >> 4) & 0x0f)));
+      b.put((byte) ('A' + (c & 0x0f)));
+    }
+    b.put((byte) 0);
+    b.putShort((short) 0x21).putShort((short) 1);
+    return b.array();
+  }
+
+  /** Le nom de machine dans la réponse, ou null. */
+  public static String nbstatName(byte[] buf, int len) {
+    int p = 12;
+    if (len < p + 1) return null;
+    // nom de la question (souvent repris tel quel)
+    while (p < len && buf[p] != 0) {
+      if ((buf[p] & 0xc0) == 0xc0) {
+        p += 1;
+        break;
+      }
+      p += (buf[p] & 0xff) + 1;
+    }
+    p += 1;
+    p += 2 + 2 + 4 + 2; // type, classe, TTL, longueur
+    if (p >= len) return null;
+    int count = buf[p] & 0xff;
+    p += 1;
+    for (int i = 0; i < count && p + 18 <= len; i++, p += 18) {
+      String name = new String(buf, p, 15, StandardCharsets.US_ASCII).trim();
+      int suffix = buf[p + 15] & 0xff;
+      int flags = ((buf[p + 16] & 0xff) << 8) | (buf[p + 17] & 0xff);
+      boolean group = (flags & 0x8000) != 0;
+      if (!group && (suffix == 0x00 || suffix == 0x20) && !name.isEmpty()) return name;
+    }
+    return null;
+  }
+}
