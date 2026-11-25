@@ -10,7 +10,14 @@
 
 The phone app of [PixelGuard](https://github.com/matteogalfre/PixelGuard). The desktop app pulls photos from the phone over ADB; this one does it the other way around: the phone sends them to a shared folder on your PC, and nothing needs to be installed on the PC.
 
-> Early version. It works on a real phone, but there is no release yet: build it from source for now.
+## Download
+
+[<img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" alt="Get it on Obtainium" height="60">](https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/matteogalfre/PixelGuard-mobile)
+[<img src="https://raw.githubusercontent.com/Kunzisoft/Github-badge/main/get-it-on-github.png" alt="Get it on GitHub" height="60">](https://github.com/matteogalfre/PixelGuard-mobile/releases/latest)
+
+Obtainium keeps the app up to date straight from this repository's releases. Android 11 or newer.
+
+> Early version: feedback is very welcome, especially with a Windows PC.
 
 ## Features
 
