@@ -147,55 +147,126 @@ public final class SmbCore {
     }
   }
 
+  /** Ouvre (ou rouvre) la source : il faut pouvoir la relire depuis le début. */
+  public interface Source {
+    InputStream open() throws IOException;
+  }
+
+  /** En dessous de cette taille, recommencer coûte moins que vérifier la reprise. */
+  public static final long RESUME_MIN = 8L << 20;
+  private static final int RESUME_PROBE = 64 * 1024;
+
+  private static void skipFully(InputStream in, long n) throws IOException {
+    while (n > 0) {
+      long k = in.skip(n);
+      if (k <= 0) {
+        if (in.read() < 0) throw new IOException("Fichier plus court que prévu");
+        k = 1;
+      }
+      n -= k;
+    }
+  }
+
+  private static int readAt(File file, byte[] buf, long offset, int len) {
+    int got = 0;
+    while (got < len) {
+      int n = file.read(buf, offset + got, got, len - got);
+      if (n <= 0) break;
+      got += n;
+    }
+    return got;
+  }
+
   /**
-   * Écrit `in` sous « target.part » en gardant DEPTH écritures en vol (le Wi-Fi ne reste jamais
-   * à vide en attendant les accusés de réception), puis renomme en « target ». Si `keep` est
-   * faux, le fichier est effacé à la fin (test de vitesse). Renvoie le nombre d'octets écrits.
+   * Un « .part » laissé par un envoi coupé : on reprend s'il est assez gros et si ses derniers
+   * 64 Ko sont identiques au même endroit de l'original. Renvoie l'octet où reprendre (0 sinon)
+   * et laisse `in` positionné dessus.
    */
-  public static long upload(DiskShare share, InputStream in, String target, long expected, int maxWrite,
-                            boolean keep, Progress progress, Cancel cancel) throws IOException {
+  private static long resumeOffset(File file, InputStream in, long existing, long expected) throws IOException {
+    if (existing < RESUME_MIN || expected <= existing) return 0;
+    int probe = (int) Math.min(RESUME_PROBE, existing);
+    byte[] remote = new byte[probe];
+    if (readAt(file, remote, existing - probe, probe) != probe) return 0;
+    skipFully(in, existing - probe);
+    byte[] local = new byte[probe];
+    if (readChunk(in, local, probe) != probe) return 0;
+    return Arrays.equals(remote, local) ? existing : 0;
+  }
+
+  /**
+   * Écrit la source sous « target.part » en gardant DEPTH écritures en vol (le Wi-Fi ne reste
+   * jamais à vide en attendant les accusés de réception), puis renomme en « target ».
+   * Si `mayResume` (l'appelant sait que ce « .part » vient de cet original), un envoi coupé est
+   * repris là où il s'était arrêté, après contrôle de ses 64 derniers Ko. Un envoi coupé à son
+   * tour garde son « .part » pour la prochaine fois. Si `keep` est faux, le fichier est effacé
+   * à la fin (test de vitesse). Renvoie la taille du fichier sur le PC.
+   */
+  public static long upload(DiskShare share, Source source, String target, long expected, int maxWrite,
+                            boolean keep, boolean mayResume, Progress progress, Cancel cancel) throws IOException {
     int chunk = Math.max(4096, Math.min(CHUNK, maxWrite));
     String finalPath = smbPath(target);
     String part = finalPath + ".part";
     File file = share.openFile(
         part,
-        EnumSet.of(AccessMask.GENERIC_WRITE, AccessMask.DELETE),
+        EnumSet.of(AccessMask.GENERIC_READ, AccessMask.GENERIC_WRITE, AccessMask.DELETE),
         EnumSet.of(FileAttributes.FILE_ATTRIBUTE_NORMAL),
         SMB2ShareAccess.ALL,
-        SMB2CreateDisposition.FILE_OVERWRITE_IF,
+        keep ? SMB2CreateDisposition.FILE_OPEN_IF : SMB2CreateDisposition.FILE_OVERWRITE_IF,
         null);
     boolean ok = false;
-    long issued = 0;
+    boolean resumable = false;
+    InputStream in = null;
     long acked = 0;
-    // DEPTH+1 tampons : on remplit le suivant pendant que les DEPTH autres sont en vol.
-    byte[][] buffers = new byte[DEPTH + 1][chunk];
-    ArrayDeque<Future<Long>> inflight = new ArrayDeque<>();
-    ArrayDeque<Integer> lengths = new ArrayDeque<>();
-    int slot = 0;
     try {
-      while (true) {
-        if (cancel.get()) throw new Cancelled();
-        byte[] buf = buffers[slot];
-        slot = (slot + 1) % buffers.length;
-        int n = readChunk(in, buf, chunk);
-        if (n <= 0) break;
-        while (inflight.size() >= DEPTH) {
+      in = source.open();
+      long existing = keep ? file.getFileInformation(FileStandardInformation.class).getEndOfFile() : 0;
+      long start = mayResume ? resumeOffset(file, in, existing, expected) : 0;
+      if (start == 0) {
+        if (existing > 0) {
+          // Rien à reprendre : on repart d'un fichier vide, et d'une source relue du début.
+          file.setLength(0);
+          in.close();
+          in = source.open();
+        }
+      }
+      long issued = start;
+      acked = start;
+      progress.onBytes(acked);
+      // DEPTH+1 tampons : on remplit le suivant pendant que les DEPTH autres sont en vol.
+      byte[][] buffers = new byte[DEPTH + 1][chunk];
+      ArrayDeque<Future<Long>> inflight = new ArrayDeque<>();
+      ArrayDeque<Integer> lengths = new ArrayDeque<>();
+      int slot = 0;
+      try {
+        while (true) {
+          if (cancel.get()) throw new Cancelled();
+          byte[] buf = buffers[slot];
+          slot = (slot + 1) % buffers.length;
+          int n = readChunk(in, buf, chunk);
+          if (n <= 0) break;
+          while (inflight.size() >= DEPTH) {
+            long w = await(inflight.poll());
+            int len = lengths.poll();
+            if (w != len) throw new IOException("Écriture incomplète sur le PC");
+            acked += w;
+            progress.onBytes(acked);
+          }
+          inflight.add(file.writeAsync(buf, issued, 0, n));
+          lengths.add(n);
+          issued += n;
+        }
+        while (!inflight.isEmpty()) {
           long w = await(inflight.poll());
           int len = lengths.poll();
           if (w != len) throw new IOException("Écriture incomplète sur le PC");
           acked += w;
           progress.onBytes(acked);
         }
-        inflight.add(file.writeAsync(buf, issued, 0, n));
-        lengths.add(n);
-        issued += n;
-      }
-      while (!inflight.isEmpty()) {
-        long w = await(inflight.poll());
-        int len = lengths.poll();
-        if (w != len) throw new IOException("Écriture incomplète sur le PC");
-        acked += w;
-        progress.onBytes(acked);
+      } catch (Cancelled | com.hierynomus.protocol.transport.TransportException
+               | com.hierynomus.smbj.common.SMBRuntimeException e) {
+        // Arrêt ou coupure réseau : ce qui est déjà écrit pourra servir à la reprise.
+        resumable = keep;
+        throw e;
       }
       if (expected >= 0 && acked != expected) {
         throw new IOException("Copie incomplète (" + acked + " sur " + expected + " octets)");
@@ -210,7 +281,14 @@ public final class SmbCore {
         ok = true;
       }
     } finally {
-      if (!ok) {
+      if (in != null) {
+        try {
+          in.close();
+        } catch (Exception ignored) {
+        }
+      }
+      // On garde un « .part » repris plus tard seulement s'il vaut la peine.
+      if (!ok && !(resumable && acked >= RESUME_MIN)) {
         try {
           file.deleteOnClose();
         } catch (Exception ignored) {

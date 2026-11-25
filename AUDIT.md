@@ -104,9 +104,14 @@ Le Wi-Fi lui-même. Dans l'ordre :
 
 Le test de vitesse de l'appli permet de comparer.
 
+## Ajouts du 25/11 (après le premier essai)
+
+- **Écran éteint** : un service de premier plan (type `dataSync`) garde l'appli en vie avec un verrou processeur. Sa notification montre la progression et un bouton Arrêter. Ça ne va pas plus vite, mais on n'a plus à garder l'écran allumé.
+- **Reprise** : un envoi coupé (Arrêter, Wi-Fi perdu) garde son `.part` s'il dépasse 8 Mo. Le téléphone note quel original l'a écrit (adresse du média, taille, date). La fois suivante, seul ce même original reprend là où il s'était arrêté, après comparaison des 64 derniers Ko. Un `.part` écrit par un autre fichier, même s'il lui ressemble, repart de zéro : le banc d'essai vérifie les deux cas.
+- **Anneau** : il n'affiche plus « 0 % à l'abri » à l'aveugle. Il montre la part déjà sur le PC d'après la dernière comparaison, et « ? » tant qu'on n'a pas comparé.
+
 ## Pistes pour plus tard
 
-- **Écran éteint** : un service de premier plan avec une notification de progression. Ça ne va pas plus vite, mais on n'a plus à garder l'écran allumé.
 - **Lecture en flux pour la vérification** : relire la copie en parallèle de la lecture locale (aujourd'hui c'est l'une après l'autre).
 - **SMB multicanal** : smbj ne le gère pas.
 - **Compression SMB** : inutile, photos et vidéos sont déjà compressées.
