@@ -18,7 +18,11 @@ The phone app of [PixelGuard](https://github.com/matteogalfre/PixelGuard). The d
 - [x] Finds your PC on the network and lists its shared folders, you only type your Windows password
 - [x] Pick the albums (Camera, WhatsApp, screenshots...), photos or videos, everything or just this month
 - [x] Sorted on the PC the way you like: by month like PixelGuard (`2026 November`), by year, by album, or all in one folder
-- [x] Tells you before sending what's already on the PC and what's missing
+- [x] Tells you before sending what's already on the PC and what's missing, and lets you untick photos or videos you don't want to send
+- [x] Keeps going with the screen off, with a progress notification and a Stop button
+- [x] A video cut halfway (Wi-Fi drop, Stop) picks up where it left off next time
+- [x] Several PCs (desktop, NAS, Mac): pick where the next backup goes
+- [x] A history of past backups: date, files, size, speed
 - [x] Skips what's already there, even if the desktop app copied it over USB (with the by-month sorting)
 - [x] Encrypted transfers (SMB 3), with the phone's hardware AES
 - [x] Frees up space: every copy is read back and compared byte by byte before anything leaves the phone, then Android asks you and moves it to the trash

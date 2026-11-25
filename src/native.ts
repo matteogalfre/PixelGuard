@@ -97,10 +97,17 @@ function demo(): PgApi {
     cancel() { stop = true; },
     resetCancel() { stop = false; },
     holdWifi() {},
+    startTransferService() {},
+    updateTransferService() {},
+    stopTransferService() {},
     async removeFromPhone() { await wait(300); return true; },
     async saveText(n, t) { texts.set(n, t); return true; },
     async loadText(n) { return texts.get(n) ?? null; },
-    addListener(_e, cb) { listeners.add(cb); return { remove: () => listeners.delete(cb) }; },
+    addListener(e: string, cb: (x: { id: string; bytes: number }) => void) {
+      if (e !== 'onProgress') return { remove: () => {} };
+      listeners.add(cb);
+      return { remove: () => listeners.delete(cb) };
+    },
   };
 }
 

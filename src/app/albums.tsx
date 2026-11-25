@@ -49,10 +49,10 @@ export default function Sources() {
                   }}
                   style={{
                     paddingHorizontal: 14, paddingVertical: 10, borderRadius: 16, borderWidth: 1,
-                    borderColor: on ? C.cyan : C.line, backgroundColor: on ? 'rgba(34,195,240,0.12)' : C.surface,
+                    borderColor: on ? C.accent : C.line, backgroundColor: on ? 'rgba(124,108,255,0.16)' : C.surface,
                   }}
                 >
-                  <Text style={{ color: on ? C.cyan : C.text, fontFamily: F.semi }}>
+                  <Text style={{ color: on ? C.accent : C.text, fontFamily: F.semi }}>
                     {t.monthLabel(MONTHS[lang][mo.month - 1], mo.year)}
                   </Text>
                   <Text style={ty.small}>
@@ -74,7 +74,7 @@ export default function Sources() {
           }}
           hitSlop={8}
         >
-          <Text style={[ty.small, { color: C.cyan, fontFamily: F.semi }]}>{allOn ? t.none : t.all}</Text>
+          <Text style={[ty.small, { color: C.accent, fontFamily: F.semi }]}>{allOn ? t.none : t.all}</Text>
         </Pressable>
       </View>
       {stats ? (
@@ -96,7 +96,7 @@ export default function Sources() {
                 borderRadius: 22,
                 overflow: 'hidden',
                 borderWidth: 2,
-                borderColor: on ? C.cyan : 'transparent',
+                borderColor: on ? C.accent : 'transparent',
                 opacity: on ? 1 : 0.55,
                 transform: [{ scale: pressed ? 0.97 : 1 }],
               })}
@@ -116,7 +116,7 @@ export default function Sources() {
               <View style={{ position: 'absolute', top: 10, right: 10 }}>
                 {on ? (
                   <LinearGradient colors={GRADIENT} style={{ width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' }}>
-                    <MaterialCommunityIcons name="check" size={18} color="#041018" />
+                    <MaterialCommunityIcons name="check" size={18} color="#FFFFFF" />
                   </LinearGradient>
                 ) : (
                   <View style={{ width: 28, height: 28, borderRadius: 14, borderWidth: 2, borderColor: 'rgba(255,255,255,0.7)' }} />

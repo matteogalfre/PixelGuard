@@ -32,7 +32,7 @@ export default function SortingScreen() {
       <Card style={{ gap: 8 }}>
         <Text style={ty.label}>{t.preview}</Text>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-          <MaterialCommunityIcons name="folder-network" size={18} color={C.cyan} />
+          <MaterialCommunityIcons name="folder-network" size={18} color={C.accent} />
           <Text style={[ty.mono, { color: C.text }]} numberOfLines={1}>{root.replace(/\//g, '\\')}</Text>
         </View>
         {samples.map((m) => {
@@ -42,7 +42,7 @@ export default function SortingScreen() {
             <View key={m.name} style={{ gap: 2 }}>
               {parts.map((part, i) => (
                 <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingLeft: 14 + i * 16 }}>
-                  <MaterialCommunityIcons name="folder" size={16} color={C.violet} />
+                  <MaterialCommunityIcons name="folder" size={16} color={C.accent2} />
                   <Text style={[ty.mono, { color: C.text }]}>{part}</Text>
                 </View>
               ))}
@@ -67,22 +67,22 @@ export default function SortingScreen() {
             }}
             style={({ pressed }) => ({
               flexDirection: 'row', alignItems: 'center', gap: 14, padding: 16, borderRadius: 20,
-              backgroundColor: on ? 'rgba(34,195,240,0.10)' : pressed ? C.surfaceHi : C.surface,
-              borderWidth: 1, borderColor: on ? C.cyan : C.line,
+              backgroundColor: on ? 'rgba(124,108,255,0.14)' : pressed ? C.surfaceHi : C.surface,
+              borderWidth: 1, borderColor: on ? C.accent : C.line,
             })}
           >
-            <MaterialCommunityIcons name={ICONS[l]} size={24} color={on ? C.cyan : C.muted} />
+            <MaterialCommunityIcons name={ICONS[l]} size={24} color={on ? C.accent : C.muted} />
             <View style={{ flex: 1, gap: 2 }}>
-              <Text style={[ty.h3, on && { color: C.cyan }]}>{name}</Text>
+              <Text style={[ty.h3, on && { color: C.accent }]}>{name}</Text>
               <Text style={ty.small}>{hint}</Text>
             </View>
-            <MaterialCommunityIcons name={on ? 'radiobox-marked' : 'radiobox-blank'} size={22} color={on ? C.cyan : C.faint} />
+            <MaterialCommunityIcons name={on ? 'radiobox-marked' : 'radiobox-blank'} size={22} color={on ? C.accent : C.faint} />
           </Pressable>
         );
       })}
 
       <Card style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
-        <MaterialCommunityIcons name="file-tree-outline" size={24} color={C.violet} />
+        <MaterialCommunityIcons name="file-tree-outline" size={24} color={C.accent2} />
         <View style={{ flex: 1, gap: 2 }}>
           <Text style={ty.h3}>{t.splitKinds}</Text>
           <Text style={ty.small}>{t.splitKindsHint}</Text>
@@ -93,7 +93,7 @@ export default function SortingScreen() {
             tap();
             setSorting({ ...sorting, splitKinds: v });
           }}
-          trackColor={{ true: C.cyan, false: C.line }}
+          trackColor={{ true: C.accent, false: C.line }}
           thumbColor="#fff"
         />
       </Card>

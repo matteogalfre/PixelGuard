@@ -1,8 +1,11 @@
 package expo.modules.pgnative
 
 import android.app.Activity
+import android.app.NotificationManager
 import android.content.ContentUris
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Uri
 import android.net.wifi.WifiManager
@@ -82,7 +85,14 @@ class PgNativeModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("PgNative")
-    Events("onProgress")
+    Events("onProgress", "onStopRequested")
+
+    OnCreate {
+      TransferService.onStopRequested = {
+        cancelled.set(true)
+        sendEvent("onStopRequested", mapOf<String, Any?>())
+      }
+    }
 
     // ---------- Galerie
 
@@ -157,8 +167,8 @@ class PgNativeModule : Module() {
       withContext(Dispatchers.IO) { guard { speedTest(dir, megabytes) } }
     }
 
-    AsyncFunction("upload") Coroutine { uri: String, remotePath: String, size: Double, transferId: String ->
-      withContext(Dispatchers.IO) { guard { upload(uri, remotePath, size.toLong(), transferId) } }
+    AsyncFunction("upload") Coroutine { uri: String, remotePath: String, size: Double, transferId: String, sourceKey: String ->
+      withContext(Dispatchers.IO) { guard { upload(uri, remotePath, size.toLong(), transferId, sourceKey) } }
     }
 
     AsyncFunction("verify") Coroutine { uri: String, remotePath: String, size: Double ->
@@ -170,6 +180,25 @@ class PgNativeModule : Module() {
 
     // Sans ce verrou, Android met le Wi-Fi en économie d'énergie entre deux paquets.
     Function("holdWifi") { on: Boolean -> holdWifi(on) }
+
+    // ---------- Écran éteint : service de premier plan
+
+    Function("startTransferService") { title: String, text: String, stopLabel: String ->
+      startService(title, text, stopLabel)
+    }
+
+    Function("updateTransferService") { text: String, progress: Int, max: Int ->
+      val ctx = context
+      val title = serviceTitle
+      if (serviceRunning) {
+        ctx.getSystemService(NotificationManager::class.java)
+          .notify(TransferService.NOTIFICATION_ID, TransferService.build(ctx, title, text, progress, max, true))
+      }
+    }
+
+    Function("stopTransferService") { title: String, finalText: String ->
+      stopService(title, finalText)
+    }
 
     // ---------- Libérer de la place
 
@@ -198,6 +227,7 @@ class PgNativeModule : Module() {
 
     OnDestroy {
       holdWifi(false)
+      TransferService.onStopRequested = null
       synchronized(smbLock) { closeAll() }
     }
 
@@ -579,7 +609,7 @@ class PgNativeModule : Module() {
     holdWifi(true)
     val start = System.nanoTime()
     try {
-      SmbCore.upload(sh, SmbCore.noise(bytes), target, bytes, maxWrite, false, { done ->
+      SmbCore.upload(sh, { SmbCore.noise(bytes) }, target, bytes, maxWrite, false, false, { done ->
         sendEvent("onProgress", mapOf("id" to "speed", "bytes" to done.toDouble()))
       }, cancel)
     } finally {
@@ -599,21 +629,72 @@ class PgNativeModule : Module() {
     )
   }
 
-  private fun upload(uri: String, remotePath: String, expected: Long, transferId: String): Map<String, Any?> {
+  // Quel original a écrit chaque « .part » encore sur un PC : on ne reprend que celui-là.
+  private val resumeLock = Any()
+
+  private fun resumeKey(remotePath: String): String {
+    val s = settings
+    return "${s?.host}|${s?.share}|${SmbCore.smbPath(remotePath).lowercase()}"
+  }
+
+  private fun resumeMap(): MutableMap<String, String> {
+    val f = privateFile("resume.json")
+    val out = HashMap<String, String>()
+    if (!f.isFile) return out
+    try {
+      val json = org.json.JSONObject(f.readText())
+      json.keys().forEach { k -> out[k] = json.getString(k) }
+    } catch (_: Exception) {}
+    return out
+  }
+
+  private fun saveResumeMap(map: Map<String, String>) {
+    val json = org.json.JSONObject()
+    map.forEach { (k, v) -> json.put(k, v) }
+    privateFile("resume.json").writeText(json.toString())
+  }
+
+  private fun upload(uri: String, remotePath: String, expected: Long, transferId: String, sourceKey: String): Map<String, Any?> {
     if (cancelled.get()) throw PgError("CANCELLED", "Arrêté")
     val sh = ensureShare()
+    val key = resumeKey(remotePath)
+    val mayResume = synchronized(resumeLock) {
+      val map = resumeMap()
+      val ours = map[key] == sourceKey
+      map[key] = sourceKey
+      saveResumeMap(map)
+      ours
+    }
     var lastEmit = 0L
-    val sent = openOriginal(uri).use { input ->
-      SmbCore.upload(sh, input, remotePath, expected, maxWrite, true, { done ->
+    var done = false
+    try {
+      val sent = SmbCore.upload(sh, { openOriginal(uri) }, remotePath, expected, maxWrite, true, mayResume, { bytes ->
         val now = System.currentTimeMillis()
         if (now - lastEmit > 200) {
           lastEmit = now
-          sendEvent("onProgress", mapOf("id" to transferId, "bytes" to done.toDouble()))
+          sendEvent("onProgress", mapOf("id" to transferId, "bytes" to bytes.toDouble()))
         }
       }, cancel)
+      done = true
+      sendEvent("onProgress", mapOf("id" to transferId, "bytes" to sent.toDouble()))
+      return mapOf("bytes" to sent.toDouble())
+    } catch (e: SmbCore.Cancelled) {
+      throw e
+    } catch (e: com.hierynomus.protocol.transport.TransportException) {
+      throw e
+    } catch (e: com.hierynomus.smbj.common.SMBRuntimeException) {
+      if (e is SMBApiException) done = true // refus du PC : pas de reprise à garder
+      throw e
+    } catch (e: Exception) {
+      done = true
+      throw e
+    } finally {
+      // Fini (ou échec sans reprise possible) : on oublie ce « .part ».
+      if (done) synchronized(resumeLock) {
+        val map = resumeMap()
+        if (map.remove(key) != null) saveResumeMap(map)
+      }
     }
-    sendEvent("onProgress", mapOf("id" to transferId, "bytes" to sent.toDouble()))
-    return mapOf("bytes" to sent.toDouble())
   }
 
   // Relit la copie du PC et la compare à l'original du téléphone.
@@ -621,6 +702,43 @@ class PgNativeModule : Module() {
     val local = openOriginal(uri).use { SmbCore.md5(it, cancel) }
     val remote = SmbCore.md5Remote(ensureShare(), remotePath, size, maxRead, cancel)
     return mapOf("same" to (local == remote), "local" to local, "remote" to remote, "missing" to (remote == null))
+  }
+
+  private var serviceRunning = false
+  private var serviceTitle = ""
+
+  private fun startService(title: String, text: String, stopLabel: String) {
+    val ctx = context
+    TransferService.stopLabel = stopLabel
+    TransferService.ensureChannel(ctx, title)
+    // Android 13+ : la notification a besoin de cette permission (le service tourne sans).
+    if (Build.VERSION.SDK_INT >= 33 &&
+      ctx.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+    ) {
+      appContext.currentActivity?.requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 4713)
+    }
+    ctx.getSystemService(NotificationManager::class.java).cancel(TransferService.DONE_ID)
+    val intent = Intent(ctx, TransferService::class.java)
+      .putExtra(TransferService.EXTRA_TITLE, title)
+      .putExtra(TransferService.EXTRA_TEXT, text)
+    try {
+      ctx.startForegroundService(intent)
+      serviceRunning = true
+      serviceTitle = title
+    } catch (e: Exception) {
+      // Démarrage refusé (appli déjà en arrière-plan) : la sauvegarde continue écran allumé.
+      serviceRunning = false
+    }
+  }
+
+  private fun stopService(title: String, finalText: String) {
+    val ctx = context
+    if (serviceRunning) ctx.stopService(Intent(ctx, TransferService::class.java))
+    serviceRunning = false
+    if (finalText.isNotEmpty()) {
+      ctx.getSystemService(NotificationManager::class.java)
+        .notify(TransferService.DONE_ID, TransferService.build(ctx, title, finalText, 0, 0, false))
+    }
   }
 
   private fun holdWifi(on: Boolean) {

@@ -47,13 +47,20 @@ export type PgApi = {
   mkdirs(dir: string): Promise<boolean>;
   testWrite(dir: string): Promise<{ ok: boolean }>;
   speedTest(dir: string, megabytes: number): Promise<SpeedResult>;
-  upload(uri: string, remotePath: string, size: number, transferId: string): Promise<{ bytes: number }>;
+  /** `sourceKey` identifie l'original : seul un « .part » écrit par lui peut être repris. */
+  upload(uri: string, remotePath: string, size: number, transferId: string, sourceKey: string): Promise<{ bytes: number }>;
   verify(uri: string, remotePath: string, size: number): Promise<VerifyResult>;
   cancel(): void;
   resetCancel(): void;
   holdWifi(on: boolean): void;
+  /** Service de premier plan : la sauvegarde continue écran éteint, avec une notification. */
+  startTransferService(title: string, text: string, stopLabel: string): void;
+  updateTransferService(text: string, progress: number, max: number): void;
+  /** `finalText` vide : la notification disparaît ; sinon elle reste avec ce texte. */
+  stopTransferService(title: string, finalText: string): void;
   removeFromPhone(uris: string[], toTrash: boolean): Promise<boolean>;
   saveText(name: string, text: string): Promise<boolean>;
   loadText(name: string): Promise<string | null>;
   addListener(event: 'onProgress', cb: (e: { id: string; bytes: number }) => void): { remove(): void };
+  addListener(event: 'onStopRequested', cb: () => void): { remove(): void };
 };

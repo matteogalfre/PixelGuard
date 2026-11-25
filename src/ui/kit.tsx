@@ -24,16 +24,18 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, Path, Stop, LinearGradient as SvgGradient } from 'react-native-svg';
 
 export const C = {
-  bg: '#06090E',
-  bg2: '#0B1220',
+  bg: '#07060F',
+  bg2: '#0E0B1E',
   surface: 'rgba(255,255,255,0.045)',
   surfaceHi: 'rgba(255,255,255,0.08)',
   line: 'rgba(255,255,255,0.09)',
   text: '#F2F6FA',
   muted: '#8B98A8',
   faint: '#566273',
-  cyan: '#22C3F0',
-  violet: '#7C6CFF',
+  /** Violet du logo, éclairci pour rester lisible sur fond nuit. */
+  accent: '#9C8CFF',
+  /** Violet profond, bas du dégradé. */
+  accent2: '#6A55F5',
   ok: '#37D69A',
   warn: '#FFB547',
   danger: '#FF6B72',
@@ -47,7 +49,7 @@ export const F = {
   black: 'Inter_800ExtraBold',
 };
 
-export const GRADIENT = [C.cyan, C.violet] as const;
+export const GRADIENT = ['#8F7DFF', '#6A55F5'] as const;
 
 export function tap() {
   if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
@@ -63,7 +65,7 @@ export function Screen({ children, scroll = true }: { children: ReactNode; scrol
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
       <LinearGradient
-        colors={['rgba(34,195,240,0.16)', 'rgba(124,108,255,0.06)', 'transparent']}
+        colors={['rgba(124,108,255,0.22)', 'rgba(176,108,255,0.07)', 'transparent']}
         start={{ x: 0.1, y: 0 }}
         end={{ x: 0.9, y: 0.55 }}
         style={StyleSheet.absoluteFill}
@@ -147,7 +149,7 @@ export function MainButton({
   disabled?: boolean;
   busy?: boolean;
 }) {
-  const fg = kind === 'ghost' ? C.text : '#041018';
+  const fg = kind === 'ghost' ? C.text : '#FFFFFF';
   const inner = (
     <View style={s.buttonInner}>
       {busy ? (
@@ -202,8 +204,8 @@ export function Ring({ value, size = 200, stroke = 14, children }: { value: numb
       <Svg width={size} height={size} style={StyleSheet.absoluteFill}>
         <Defs>
           <SvgGradient id="ring" x1="0" y1="0" x2="1" y2="1">
-            <Stop offset="0" stopColor={C.cyan} />
-            <Stop offset="1" stopColor={C.violet} />
+            <Stop offset="0" stopColor={C.accent} />
+            <Stop offset="1" stopColor={C.accent2} />
           </SvgGradient>
         </Defs>
         <Circle cx={size / 2} cy={size / 2} r={r} stroke={C.line} strokeWidth={stroke} fill="none" />
@@ -254,12 +256,12 @@ export function Sparkline({ values, width, height = 44 }: { values: number[]; wi
     <Svg width={width} height={height}>
       <Defs>
         <SvgGradient id="spark" x1="0" y1="0" x2="0" y2="1">
-          <Stop offset="0" stopColor={C.cyan} stopOpacity={0.35} />
-          <Stop offset="1" stopColor={C.cyan} stopOpacity={0} />
+          <Stop offset="0" stopColor={C.accent} stopOpacity={0.35} />
+          <Stop offset="1" stopColor={C.accent} stopOpacity={0} />
         </SvgGradient>
       </Defs>
       <Path d={area} fill="url(#spark)" />
-      <Path d={line} stroke={C.cyan} strokeWidth={2} fill="none" strokeLinejoin="round" />
+      <Path d={line} stroke={C.accent} strokeWidth={2} fill="none" strokeLinejoin="round" />
     </Svg>
   );
 }
@@ -269,7 +271,7 @@ export function Thumb({ uri, size, radius = 12, style }: { uri?: string; size: n
   const box = { width: size, height: size, borderRadius: radius, overflow: 'hidden' as const };
   if (!uri) {
     return (
-      <LinearGradient colors={['#13324A', '#2A2457']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={[box, { alignItems: 'center', justifyContent: 'center' }, style]}>
+      <LinearGradient colors={['#2A2160', '#16122E']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={[box, { alignItems: 'center', justifyContent: 'center' }, style]}>
         <MaterialCommunityIcons name="image-outline" size={typeof size === 'number' ? size * 0.38 : 28} color="rgba(255,255,255,0.35)" />
       </LinearGradient>
     );
@@ -335,11 +337,11 @@ export function Step({ n, title, done, active, children }: { n: number; title: s
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
         {done ? (
           <LinearGradient colors={GRADIENT} style={s.stepBadge}>
-            <MaterialCommunityIcons name="check" size={16} color="#041018" />
+            <MaterialCommunityIcons name="check" size={16} color="#FFFFFF" />
           </LinearGradient>
         ) : (
-          <View style={[s.stepBadge, { borderWidth: 1.5, borderColor: active ? C.cyan : C.line }]}>
-            <Text style={[t.small, { color: active ? C.cyan : C.muted, fontFamily: F.bold }]}>{n}</Text>
+          <View style={[s.stepBadge, { borderWidth: 1.5, borderColor: active ? C.accent : C.line }]}>
+            <Text style={[t.small, { color: active ? C.accent : C.muted, fontFamily: F.bold }]}>{n}</Text>
           </View>
         )}
         <Text style={t.h3}>{title}</Text>

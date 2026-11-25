@@ -1,6 +1,7 @@
 import {
   decide,
   folderState,
+  humanBytes,
   joinPath,
   inPeriod,
   keepKind,
@@ -17,6 +18,7 @@ import {
   type Period,
   type Sorting,
 } from './logic';
+import { t } from './i18n';
 import { errorCode, errorMessage, Pg, type MediaItem } from './native';
 import { loadIndex, saveIndex, type CopyIndex, type PcSettings } from './store';
 
@@ -49,6 +51,7 @@ export type BackupResult = {
   bytes: number;
   seconds: number;
   errors: string[];
+  encrypted: boolean;
 };
 
 /** Fichiers envoyés en même temps : les petites photos s'enchaînent sans temps mort. */
@@ -72,6 +75,9 @@ function connect(pc: PcSettings, password: string) {
 
 const dirOf = (path: string) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '');
 const baseOf = (path: string) => path.slice(path.lastIndexOf('/') + 1);
+
+/** Identité d'un original : un « .part » n'est repris que s'il vient du même fichier. */
+const sourceKey = (m: MediaItem) => `${m.uri}|${m.size}|${m.modified}`;
 
 /** Fait tourner `fn` sur chaque élément, `n` à la fois. */
 async function pool<T>(items: T[], n: number, fn: (item: T, index: number) => Promise<void>): Promise<void> {
@@ -116,8 +122,8 @@ async function sourceItems(albumIds: string[], kinds: Kinds): Promise<MediaItem[
 }
 
 /** Ce qui est déjà sur le PC d'après les sauvegardes passées, sans toucher au réseau. */
-export async function stats(albumIds: string[], kinds: Kinds, period: Period): Promise<Stats> {
-  const [all, index] = await Promise.all([sourceItems(albumIds, kinds), loadIndex()]);
+export async function stats(albumIds: string[], kinds: Kinds, period: Period, pcId: string): Promise<Stats> {
+  const [all, index] = await Promise.all([sourceItems(albumIds, kinds), loadIndex(pcId)]);
   const months = monthsOf(all);
   const items = all.filter((m) => inPeriod(m, period));
   const photo = items.find((m) => !m.video);
@@ -153,7 +159,16 @@ export type Comparison = {
   folders: string[];
 };
 
-type Selection = { pc: PcSettings; albumIds: string[]; kinds: Kinds; period: Period; sorting: Sorting; lang: Lang };
+type Selection = {
+  pc: PcSettings;
+  albumIds: string[];
+  kinds: Kinds;
+  period: Period;
+  sorting: Sorting;
+  lang: Lang;
+  /** Médias retirés à la main de cet envoi. */
+  exclude?: Set<string>;
+};
 
 /**
  * Ce que le PC a déjà et ce qui manque, sans rien envoyer. Lit chaque dossier visé (4 à la fois),
@@ -162,8 +177,10 @@ type Selection = { pc: PcSettings; albumIds: string[]; kinds: Kinds; period: Per
  */
 async function compareWithPc(opts: Selection, onDetail: (d: string) => void): Promise<Comparison> {
   const { pc, lang } = opts;
-  const items = (await sourceItems(opts.albumIds, opts.kinds)).filter((m) => inPeriod(m, opts.period));
-  const index: CopyIndex = await loadIndex();
+  const items = (await sourceItems(opts.albumIds, opts.kinds)).filter(
+    (m) => inPeriod(m, opts.period) && !opts.exclude?.has(m.id),
+  );
+  const index: CopyIndex = await loadIndex(pc.id);
 
   const targets = targetFolders(items, opts.sorting, lang);
   const dirs = new Set(targets.map((f) => joinPath(pc.folder, f)));
@@ -246,7 +263,7 @@ export async function preview(opts: Selection & { password: string }): Promise<P
   Pg.resetCancel();
   const info = await connect(opts.pc, opts.password);
   const cmp = await compareWithPc(opts, () => {});
-  await saveIndex(cmp.index); // ce qu'on a vu sur le PC sert aussi à l'anneau
+  await saveIndex(opts.pc.id, cmp.index); // ce qu'on a vu sur le PC sert aussi à l'anneau
   const missing = cmp.uploads.map((e) => e.item);
   const { index: _i, entries: _e, uploads: _u, ...rest } = cmp;
   return {
@@ -258,17 +275,10 @@ export async function preview(opts: Selection & { password: string }): Promise<P
   };
 }
 
-export async function runBackup(opts: {
-  pc: PcSettings;
-  password: string;
-  albumIds: string[];
-  kinds: Kinds;
-  period: Period;
-  sorting: Sorting;
-  lang: Lang;
-  onProgress: (p: Progress) => void;
-}): Promise<BackupResult> {
-  const { pc, onProgress } = opts;
+export async function runBackup(
+  opts: Selection & { password: string; onProgress: (p: Progress) => void },
+): Promise<BackupResult> {
+  const { pc, lang, onProgress } = opts;
   stopRequested = false;
   Pg.resetCancel();
   const started = Date.now();
@@ -276,8 +286,23 @@ export async function runBackup(opts: {
   const errors: string[] = [];
   onProgress({ ...p });
 
-  await connect(pc, opts.password);
+  const info = await connect(pc, opts.password);
   Pg.holdWifi(true);
+  // Service de premier plan : la sauvegarde continue écran éteint, avec sa notification.
+  Pg.startTransferService(t.notifTitle, t.phase.compare, t.stop);
+  const stopSub = Pg.addListener('onStopRequested', () => stop());
+  let lastNotif = 0;
+  const notify = (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastNotif < 1000) return;
+    lastNotif = now;
+    Pg.updateTransferService(
+      t.notifProgress(p.doneFiles, p.totalFiles, humanBytes(p.speed, lang)),
+      p.totalBytes ? Math.round((p.doneBytes / p.totalBytes) * 1000) : 0,
+      1000,
+    );
+  };
+  let finalText = '';
   try {
     p.phase = 'scan';
     onProgress({ ...p });
@@ -311,6 +336,7 @@ export async function runBackup(opts: {
       p.eta = p.speed > 1024 ? (p.totalBytes - p.doneBytes) / p.speed : 0;
       p.live = [...live.values()].map((v) => ({ ...v }));
       onProgress({ ...p });
+      notify();
     };
     const sub = Pg.addListener('onProgress', (ev) => {
       const t = live.get(ev.id);
@@ -330,7 +356,7 @@ export async function runBackup(opts: {
         try {
           let target = joinPath(pc.folder, e.folder, e.remoteName);
           try {
-            await Pg.upload(e.item.uri, target, e.item.size, id);
+            await Pg.upload(e.item.uri, target, e.item.size, id, sourceKey(e.item));
           } catch (err) {
             if (errorCode(err) !== 'EXISTS') throw err;
             // Le dossier a changé depuis le listing (PixelGuard en USB, autre téléphone...).
@@ -342,14 +368,14 @@ export async function runBackup(opts: {
               index[e.item.id] = { path: target, size: e.item.size };
               return;
             }
-            await Pg.upload(e.item.uri, target, e.item.size, id);
+            await Pg.upload(e.item.uri, target, e.item.size, id, sourceKey(e.item));
           }
           p.uploaded++;
           networkBytes += e.item.size;
           index[e.item.id] = { path: target, size: e.item.size };
           if (++sinceSave >= 25) {
             sinceSave = 0;
-            await saveIndex(index);
+            await saveIndex(pc.id, index);
           }
         } catch (err) {
           if (errorCode(err) === 'CANCELLED' || stopRequested) {
@@ -367,13 +393,14 @@ export async function runBackup(opts: {
       });
     } finally {
       sub.remove();
-      await saveIndex(index);
+      await saveIndex(pc.id, index);
     }
 
     cancelled = cancelled || stopRequested;
     p.phase = 'done';
     p.live = [];
     onProgress({ ...p });
+    finalText = cancelled ? t.stopped : t.result(p.uploaded, p.skipped, p.failed);
     return {
       uploaded: p.uploaded,
       skipped: p.skipped,
@@ -382,9 +409,12 @@ export async function runBackup(opts: {
       bytes: networkBytes,
       seconds: (Date.now() - started) / 1000,
       errors,
+      encrypted: info.encrypted,
     };
   } finally {
     Pg.holdWifi(false);
+    stopSub.remove();
+    Pg.stopTransferService(t.notifTitle, finalText);
   }
 }
 
@@ -397,8 +427,8 @@ export function dateOf(m: MediaItem): number {
 }
 
 /** Ce qui est sur le PC d'après les sauvegardes passées, plus vieux que `olderThanDays`. */
-export async function findFreeCandidates(albumIds: string[], kinds: Kinds, olderThanDays: number): Promise<FreeCandidate[]> {
-  const [items, index] = await Promise.all([sourceItems(albumIds, kinds), loadIndex()]);
+export async function findFreeCandidates(pcId: string, albumIds: string[], kinds: Kinds, olderThanDays: number): Promise<FreeCandidate[]> {
+  const [items, index] = await Promise.all([sourceItems(albumIds, kinds), loadIndex(pcId)]);
   const cutoff = Date.now() - olderThanDays * 86400e3;
   return items
     .filter((m) => index[m.id] && index[m.id].size === m.size && dateOf(m) < cutoff)
@@ -446,12 +476,12 @@ export async function verifyCandidates(opts: {
 }
 
 /** Android affiche lui-même la confirmation, puis met à la corbeille (30 jours). */
-export async function moveToTrash(verified: FreeCandidate[]): Promise<boolean> {
+export async function moveToTrash(pcId: string, verified: FreeCandidate[]): Promise<boolean> {
   const ok = await Pg.removeFromPhone(verified.map((c) => c.item.uri), true);
   if (ok) {
-    const index = await loadIndex();
+    const index = await loadIndex(pcId);
     for (const c of verified) delete index[c.item.id];
-    await saveIndex(index);
+    await saveIndex(pcId, index);
   }
   return ok;
 }

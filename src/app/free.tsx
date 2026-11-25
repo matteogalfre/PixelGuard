@@ -17,6 +17,15 @@ import { errorMessage } from '../native';
 import { useApp } from '../state';
 import { C, Card, Header, MainButton, Ring, Screen, Segmented, success, t as ty, Thumb } from '../ui/kit';
 
+/** Libère l'écran allumé, sans planter s'il n'avait pas pu être activé. */
+function releaseAwake(tag: string) {
+  try {
+    Promise.resolve(deactivateKeepAwake(tag)).catch(() => {});
+  } catch {
+    // rien à libérer
+  }
+}
+
 const size = (n: number) => humanBytes(n, lang);
 
 export default function Free() {
@@ -29,11 +38,11 @@ export default function Free() {
   const look = useCallback(async () => {
     setCandidates(null);
     try {
-      setCandidates(await findFreeCandidates(app.selected, app.kinds, age));
+      setCandidates(await findFreeCandidates(app.pc.id, app.selected, app.kinds, age));
     } catch (e) {
       Alert.alert('PixelGuard', errorMessage(e));
     }
-  }, [app.selected, app.kinds, age]);
+  }, [app.pc.id, app.selected, app.kinds, age]);
 
   useEffect(() => {
     look();
@@ -50,7 +59,7 @@ export default function Free() {
       setProgress(null);
       const notes: string[] = [];
       if (!v.cancelled && v.same.length) {
-        const ok = await moveToTrash(v.same);
+        const ok = await moveToTrash(app.pc.id, v.same);
         notes.push(ok ? t.freeDone(v.same.length, size(v.same.reduce((n, c) => n + c.item.size, 0))) : t.freeRefused);
         if (ok) success();
       }
@@ -61,7 +70,7 @@ export default function Free() {
     } catch (e) {
       Alert.alert('PixelGuard', errorMessage(e));
     } finally {
-      deactivateKeepAwake('pixelguard-free');
+      releaseAwake('pixelguard-free');
       setProgress(null);
     }
   }
@@ -100,7 +109,7 @@ export default function Free() {
       <Segmented options={[0, 30, 90, 365].map((d) => ({ value: d, label: t.ages[d] }))} value={age} onChange={setAge} />
 
       <Card style={{ alignItems: 'center', paddingVertical: 28, gap: 6 }}>
-        <MaterialCommunityIcons name="broom" size={30} color={C.violet} />
+        <MaterialCommunityIcons name="broom" size={30} color={C.accent2} />
         {candidates == null ? (
           <Text style={ty.small}>…</Text>
         ) : candidates.length ? (
