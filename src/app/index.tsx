@@ -261,7 +261,8 @@ export default function Home() {
       <View style={{ alignItems: 'center', marginTop: 8 }}>
         <Ring value={ratio} size={230} stroke={16}>
           <Text style={ty.big}>{center}</Text>
-          <Text style={ty.small}>{caption}</Text>
+          {/* Reste dans le cercle : une légende longue passe sur deux lignes au lieu de mordre sur l'anneau. */}
+          <Text numberOfLines={2} style={[ty.small, { textAlign: 'center', maxWidth: 160 }]}>{caption}</Text>
         </Ring>
         {status ? <Text style={[ty.h3, { marginTop: 14, color: statusColor, textAlign: 'center' }]}>{status}</Text> : null}
         {lastRun ? (

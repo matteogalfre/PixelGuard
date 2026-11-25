@@ -302,7 +302,9 @@ export function Segmented<T extends string | number>({ options, value, onChange 
             }}
             style={[s.segment, on && { backgroundColor: C.surfaceHi, borderColor: C.line }]}
           >
-            <Text style={[t.small, { color: on ? C.text : C.muted, fontFamily: F.semi }]}>{o.label}</Text>
+            <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8} style={[t.small, { color: on ? C.text : C.muted, fontFamily: F.semi }]}>
+              {o.label}
+            </Text>
           </Pressable>
         );
       })}
@@ -372,7 +374,8 @@ export const s = StyleSheet.create({
   ghost: { backgroundColor: C.surface, borderWidth: 1, borderColor: C.line },
   iconButton: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: C.surface, borderWidth: 1, borderColor: C.line },
   segmented: { flexDirection: 'row', backgroundColor: 'rgba(0,0,0,0.3)', borderRadius: 14, padding: 4, gap: 4 },
-  segment: { flex: 1, alignItems: 'center', paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: 'transparent' },
+  // Chaque bouton prend la largeur de son texte (le reste est partagé) : « Mois dernier » tient sur une ligne.
+  segment: { flexGrow: 1, flexShrink: 1, flexBasis: 'auto', alignItems: 'center', justifyContent: 'center', paddingVertical: 9, paddingHorizontal: 8, borderRadius: 10, borderWidth: 1, borderColor: 'transparent' },
   input: {
     backgroundColor: 'rgba(0,0,0,0.35)', color: C.text, borderRadius: 14, borderWidth: 1, borderColor: C.line,
     paddingHorizontal: 14, height: 50, fontSize: 16, fontFamily: F.medium,
