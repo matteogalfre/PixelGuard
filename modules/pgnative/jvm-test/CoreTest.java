@@ -31,6 +31,8 @@ public class CoreTest {
     byte[] onDisk = Files.readAllBytes(Paths.get(shareDir, "Tel", "2026 Novembre", "IMG_1.jpg"));
     System.out.println("identique sur disque=" + Arrays.equals(onDisk, data) + ", .part restant=" + Files.exists(Paths.get(shareDir, "Tel", "2026 Novembre", "IMG_1.jpg.part")));
     for (var f : SmbCore.list(share, "Tel/2026 Novembre")) System.out.println("  listé: " + f.getFileName() + " " + f.getEndOfFile());
+    long[] st = SmbCore.stat(share, java.util.List.of("Tel/2026 Novembre/IMG_1.jpg", "Tel/2026 Novembre/absent.jpg", "Tel/absent/x.jpg"));
+    System.out.println("stat direct : " + st[0] + " / " + st[1] + " / " + st[2]);
     String local = SmbCore.md5(new ByteArrayInputStream(data), () -> false);
     String remote = SmbCore.md5Remote(share, "Tel/2026 Novembre/IMG_1.jpg", data.length, proto.getMaxReadSize(), () -> false);
     System.out.println("md5 local=remote " + local.equals(remote) + " absent=" + SmbCore.md5Remote(share, "Tel/nope.jpg", 5, proto.getMaxReadSize(), () -> false));

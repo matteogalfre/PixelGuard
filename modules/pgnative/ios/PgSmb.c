@@ -229,6 +229,23 @@ int pgs_list(pgs_conn *c, const char *dir, pgs_entry_cb cb, void *ctx, char *err
   return PGS_OK;
 }
 
+int pgs_stat(pgs_conn *c, const char *path, int64_t *size, char *err, size_t errlen) {
+  *size = -1;
+  if (!pgs_alive(c)) return fail(c, -ENOTCONN, err, errlen);
+  char *p = norm(path);
+  if (p == NULL) return fail(c, -ENOMEM, err, errlen);
+  clear_status(c);
+  struct smb2_stat_64 st;
+  int rc = smb2_stat(c->smb2, p, &st);
+  free(p);
+  if (rc < 0) {
+    if (not_found((uint32_t)smb2_get_nterror(c->smb2))) return PGS_OK; // absent : -1
+    return fail(c, rc, err, errlen);
+  }
+  *size = (int64_t)st.smb2_size;
+  return PGS_OK;
+}
+
 int pgs_mkdirs(pgs_conn *c, const char *dir, char *err, size_t errlen) {
   if (!pgs_alive(c)) return fail(c, -ENOTCONN, err, errlen);
   char *p = norm(dir);

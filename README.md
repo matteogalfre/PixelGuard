@@ -11,13 +11,20 @@
 
 The phone app of [PixelGuard](https://github.com/matteogalfre/PixelGuard). The desktop app pulls photos from the phone over ADB; this one does it the other way around: the phone sends them to a shared folder on your PC, and nothing needs to be installed on the PC.
 
-> Early version. It works on a real phone, but there is no release yet: build it from source for now.
+## Download
+
+[<img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" alt="Get it on Obtainium" height="60">](https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/matteogalfre/PixelGuard-mobile)
+[<img src="https://raw.githubusercontent.com/Kunzisoft/Github-badge/main/get-it-on-github.png" alt="Get it on GitHub" height="60">](https://github.com/matteogalfre/PixelGuard-mobile/releases/latest)
+
+Obtainium keeps the app up to date straight from this repository's releases. Android 11 or newer.
+
+> Early version: feedback is very welcome, especially with a Windows PC.
 
 ## Features
 
 - [x] Sends photos and videos to a Windows shared folder over your home Wi-Fi
 - [x] Finds your PC on the network and lists its shared folders, you only type your Windows password
-- [x] Pick the albums (Camera, WhatsApp, screenshots...), photos or videos, everything or just this month
+- [x] Pick the albums (Camera, WhatsApp, screenshots...), photos or videos, and the period: everything, this month, last month, the last 3 to 12 months, a year, or from one month to another
 - [x] Sorted on the PC the way you like: by month like PixelGuard (`2026 November`), by year, by album, or all in one folder
 - [x] Tells you before sending what's already on the PC and what's missing, and lets you untick photos or videos you don't want to send
 - [x] Keeps going with the screen off, with a progress notification and a Stop button
@@ -32,11 +39,13 @@ The phone app of [PixelGuard](https://github.com/matteogalfre/PixelGuard). The d
 
 ## Set up the PC (once)
 
-Open **Terminal as administrator** on Windows and paste this line. It creates `Pictures\PixelGuard` (the same folder the desktop app uses), shares it with your account, and allows file sharing on your private network only:
+On Windows, press **Windows + X**, open **Terminal** (or PowerShell), paste this line and press Enter. If Windows asks whether to allow it, say yes: the command restarts itself as administrator.
 
 ```powershell
-$d="$env:USERPROFILE\Pictures\PixelGuard"; md $d -Force >$null; New-SmbShare -Name PixelGuard -Path $d -FullAccess "$env:USERDOMAIN\$env:USERNAME"; Get-NetFirewallRule -Group "@FirewallAPI.dll,-28502" | ? Profile -like "*Private*" | Enable-NetFirewallRule
+$s='$d="$env:USERPROFILE\Pictures\PixelGuard"; md $d -Force >$null; if(-not(Get-SmbShare -Name PixelGuard -EA 0)){New-SmbShare -Name PixelGuard -Path $d -FullAccess "$env:USERDOMAIN\$env:USERNAME" >$null}; Get-NetFirewallRule -Group "@FirewallAPI.dll,-28502" | ? Profile -like "*Private*" | Enable-NetFirewallRule; Write-Host "PixelGuard is ready: $d" -ForegroundColor Green'; if(([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(544)){iex $s}else{Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-EncodedCommand',([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($s)))}
 ```
+
+It creates `Pictures\PixelGuard` (the same folder the desktop app uses), shares it with your account, and allows file sharing on your private network only. Running it twice does no harm.
 
 Or by hand: right-click a folder › Properties › Sharing › Share. A Mac works too (System Settings › General › Sharing › File Sharing).
 
@@ -53,7 +62,7 @@ The phone and the PC must be on the same Wi-Fi. The app refuses any address outs
 
 On a good 5 GHz Wi-Fi you should get tens of MB/s. The app keeps several writes in flight, sends three files at a time, and holds the Wi-Fi in low latency mode while it works. The ⚙ screen has a speed test. A guest Wi-Fi, a repeater or a PC on 2.4 GHz will slow things down a lot; a PC plugged into the router with a cable is best.
 
-Measured on the phone (Galaxy S24+): encryption with a Windows 10 or 11 PC runs at 2.2 GB/s, far above any Wi-Fi, so it costs nothing. With a Mac it tops out around 95 MB/s, and you can turn it off at home. The details are in [AUDIT.md](AUDIT.md).
+Encryption costs some speed: the phone encrypts every packet and the PC decrypts it. The phone itself keeps up easily (AES-GCM at 2.2 GB/s measured on a Galaxy S24+), it's the exchange that gets heavier. At home, on your own Wi-Fi, you can turn it off in the ⚙ screen for the fastest copies; files stay signed, so nobody can change them on the way. The details are in [AUDIT.md](AUDIT.md).
 
 ## Privacy and security
 

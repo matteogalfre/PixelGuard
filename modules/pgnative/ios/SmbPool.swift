@@ -299,6 +299,19 @@ final class SmbPool {
     }
   }
 
+  /** Taille lue sur chaque fichier (pas dans la liste du dossier), -1 s'il n'existe pas. */
+  func statFiles(_ paths: [String]) throws -> [Double] {
+    try with { c in
+      try paths.map { path in
+        var size: Int64 = -1
+        let err = CErr()
+        let rc = code(pgs_stat(c, path, &size, err.p, CErr.size))
+        if rc != Int(PGS_OK) { throw Self.error(rc, err) }
+        return Double(size)
+      }
+    }
+  }
+
   func mkdirs(_ dir: String) throws {
     try with { c in
       let err = CErr()

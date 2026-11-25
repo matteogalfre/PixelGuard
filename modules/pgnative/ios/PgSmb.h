@@ -61,6 +61,11 @@ int pgs_list_shares(pgs_conn *c, pgs_name_cb cb, void *ctx, char *err, size_t er
 typedef void (*pgs_entry_cb)(void *ctx, const char *name, uint64_t size, int dir);
 /** Contenu d'un dossier (vide s'il n'existe pas encore). */
 int pgs_list(pgs_conn *c, const char *dir, pgs_entry_cb cb, void *ctx, char *err, size_t errlen);
+/**
+ * Taille lue sur le fichier lui-même, pas dans la liste du dossier (Windows peut y montrer une
+ * taille pas encore à jour, ou une liste incomplète). `*size` vaut -1 s'il n'existe pas.
+ */
+int pgs_stat(pgs_conn *c, const char *path, int64_t *size, char *err, size_t errlen);
 /** Crée chaque niveau sans demander avant s'il existe. */
 int pgs_mkdirs(pgs_conn *c, const char *dir, char *err, size_t errlen);
 /** Écrit puis efface « dir/.pixelguard-test ». */

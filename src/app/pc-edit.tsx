@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, Switch, Text, View } from 'react-native';
 
 import { speedTest } from '../engine';
-import { lang, POWERSHELL, t } from '../i18n';
+import { lang, powershell, t } from '../i18n';
 import { humanBytes, joinPath, pickShare } from '../logic';
 import { errorMessage, Pg, type FoundPc, type LoginInfo, type SpeedResult } from '../native';
 import { useApp } from '../state';
@@ -164,13 +164,13 @@ export default function PcEdit() {
             <Pressable
               onPress={async () => {
                 tap();
-                await Clipboard.setStringAsync(POWERSHELL);
+                await Clipboard.setStringAsync(powershell(t.psDone));
                 setCopied(true);
                 setTimeout(() => setCopied(false), 2000);
               }}
               style={{ backgroundColor: 'rgba(0,0,0,0.45)', borderRadius: 14, padding: 12, gap: 8, borderWidth: 1, borderColor: C.line }}
             >
-              <Text style={[ty.mono, { color: C.text }]} selectable>{POWERSHELL}</Text>
+              <Text style={[ty.mono, { color: C.text }]} selectable>{powershell(t.psDone)}</Text>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-end' }}>
                 <MaterialCommunityIcons name={copied ? 'check' : 'content-copy'} size={16} color={C.accent} />
                 <Text style={[ty.small, { color: C.accent, fontFamily: F.semi }]}>{copied ? t.copied : t.copy}</Text>

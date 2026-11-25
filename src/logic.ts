@@ -126,32 +126,56 @@ export function keepKind(item: { video: boolean }, kinds: Kinds): boolean {
   return kinds === 'all' || (kinds === 'videos') === item.video;
 }
 
-/** Quels fichiers sauvegarder dans le temps : tout, ce mois-ci, le mois dernier, ou un mois précis. */
+/**
+ * Quels fichiers sauvegarder dans le temps : tout, ce mois-ci, le mois dernier, les N derniers
+ * mois, une année, un mois précis, ou de tel mois à tel mois (bornes incluses).
+ */
 export type Period =
   | { kind: 'all' }
   | { kind: 'thisMonth' }
   | { kind: 'lastMonth' }
-  | { kind: 'month'; year: number; month: number };
+  | { kind: 'lastMonths'; n: number }
+  | { kind: 'year'; year: number }
+  | { kind: 'month'; year: number; month: number }
+  | { kind: 'range'; from: number; to: number };
 
 export const allTime: Period = { kind: 'all' };
 
-/** Le mois visé par la période (ce mois-ci et le mois dernier suivent le calendrier). */
-export function periodMonth(p: Period, now: Date = new Date()): [number, number] | null {
-  if (p.kind === 'thisMonth') return [now.getFullYear(), now.getMonth() + 1];
-  if (p.kind === 'lastMonth') {
-    const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    return [d.getFullYear(), d.getMonth() + 1];
+/** « 2026-11 » s'écrit 202611 : on compare les mois comme des nombres. */
+export const ym = (year: number, month: number) => year * 100 + month;
+
+function shiftMonth(now: Date, delta: number): number {
+  const d = new Date(now.getFullYear(), now.getMonth() + delta, 1);
+  return ym(d.getFullYear(), d.getMonth() + 1);
+}
+
+/** Le premier et le dernier mois de la période (null : pas de limite). */
+export function periodRange(p: Period, now: Date = new Date()): [number, number] | null {
+  switch (p.kind) {
+    case 'thisMonth':
+      return [shiftMonth(now, 0), shiftMonth(now, 0)];
+    case 'lastMonth':
+      return [shiftMonth(now, -1), shiftMonth(now, -1)];
+    case 'lastMonths':
+      return [shiftMonth(now, -(Math.max(1, p.n) - 1)), shiftMonth(now, 0)];
+    case 'year':
+      return [ym(p.year, 1), ym(p.year, 12)];
+    case 'month':
+      return [ym(p.year, p.month), ym(p.year, p.month)];
+    case 'range':
+      return [Math.min(p.from, p.to), Math.max(p.from, p.to)];
+    default:
+      return null;
   }
-  if (p.kind === 'month') return [p.year, p.month];
-  return null;
 }
 
 /** Même règle que le rangement : le mois du nom de fichier, sinon de la prise de vue. */
 export function inPeriod(item: Dated, p: Period, now: Date = new Date()): boolean {
-  const target = periodMonth(p, now);
-  if (!target) return true;
+  const r = periodRange(p, now);
+  if (!r) return true;
   const [y, m] = yearMonthOf(item);
-  return y === target[0] && m === target[1];
+  const k = ym(y, m);
+  return k >= r[0] && k <= r[1];
 }
 
 export type MonthCount = { year: number; month: number; count: number; bytes: number };

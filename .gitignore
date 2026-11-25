@@ -54,3 +54,6 @@ modules/*/android/.cxx/
 
 # builds iPhone (.xcarchive, .ipa)
 /build/
+
+# APK construits en local
+dist/

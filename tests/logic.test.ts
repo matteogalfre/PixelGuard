@@ -9,6 +9,7 @@ import {
   folderFor,
   keepKind,
   inPeriod,
+  periodRange,
   monthFolderName,
   monthsOf,
   pickShare,
@@ -147,4 +148,20 @@ test('période : ce mois-ci, le mois dernier, un mois précis', () => {
     monthsOf([{ ...jan, size: 10 }, { ...dec, size: 5 }, { ...jan, name: '20260120_2.jpg', size: 1 }]),
     [{ year: 2026, month: 1, count: 2, bytes: 11 }, { year: 2025, month: 12, count: 1, bytes: 5 }],
   );
+});
+
+test('période : derniers mois, année, de tel mois à tel mois', () => {
+  const now = new Date(2026, 1, 10); // 10 février 2026
+  const nov = { name: '20251120_1.jpg', taken: 0, modified: 0 };
+  const fev = { name: '20260201_1.jpg', taken: 0, modified: 0 };
+  assert.deepEqual(periodRange({ kind: 'lastMonths', n: 3 }, now), [202512, 202602]);
+  assert.equal(inPeriod(nov, { kind: 'lastMonths', n: 3 }, now), false);
+  assert.equal(inPeriod(nov, { kind: 'lastMonths', n: 4 }, now), true);
+  assert.equal(inPeriod(nov, { kind: 'year', year: 2025 }, now), true);
+  assert.equal(inPeriod(fev, { kind: 'year', year: 2025 }, now), false);
+  assert.equal(inPeriod(nov, { kind: 'range', from: 202511, to: 202601 }, now), true);
+  assert.equal(inPeriod(fev, { kind: 'range', from: 202511, to: 202601 }, now), false);
+  // bornes dans le désordre : on remet dans l'ordre
+  assert.deepEqual(periodRange({ kind: 'range', from: 202603, to: 202511 }, now), [202511, 202603]);
+  assert.equal(periodRange({ kind: 'all' }, now), null);
 });

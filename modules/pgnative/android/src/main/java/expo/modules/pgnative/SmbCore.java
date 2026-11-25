@@ -105,6 +105,24 @@ public final class SmbCore {
     }
   }
 
+  /**
+   * Taille de chaque fichier, lue directement sur le fichier et pas dans la liste du dossier
+   * (Windows peut y montrer une taille pas encore à jour, ou une liste incomplète). -1 s'il
+   * n'existe pas.
+   */
+  public static long[] stat(DiskShare share, List<String> paths) {
+    long[] out = new long[paths.size()];
+    for (int i = 0; i < out.length; i++) {
+      try {
+        out[i] = share.getFileInformation(smbPath(paths.get(i)), FileStandardInformation.class).getEndOfFile();
+      } catch (SMBApiException e) {
+        if (!notFound(e)) throw e;
+        out[i] = -1;
+      }
+    }
+    return out;
+  }
+
   /** Contenu d'un dossier (vide s'il n'existe pas encore). */
   public static List<FileIdBothDirectoryInformation> list(DiskShare share, String dir) {
     try {

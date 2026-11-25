@@ -83,6 +83,10 @@ public final class PgNativeModule: Module {
       self.run(promise) { try self.smb.list(dir) }
     }
 
+    AsyncFunction("statFiles") { (paths: [String], promise: Promise) in
+      self.run(promise) { try self.smb.statFiles(paths) }
+    }
+
     AsyncFunction("mkdirs") { (dir: String, promise: Promise) in
       self.run(promise) {
         try self.smb.mkdirs(dir)

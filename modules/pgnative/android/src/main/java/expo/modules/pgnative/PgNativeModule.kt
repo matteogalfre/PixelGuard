@@ -152,6 +152,10 @@ class PgNativeModule : Module() {
       }
     }
 
+    AsyncFunction("statFiles") Coroutine { paths: List<String> ->
+      withContext(Dispatchers.IO) { guard { SmbCore.stat(ensureShare(), paths).map { it.toDouble() } } }
+    }
+
     AsyncFunction("mkdirs") Coroutine { dir: String ->
       withContext(Dispatchers.IO) {
         guard { SmbCore.mkdirs(ensureShare(), dir) }

@@ -211,6 +211,13 @@ int main(int argc, char **argv) {
 
   char local[33], remote[64];
   md5hex(data, len, local);
+  // Taille lue sur le fichier : présent, absent, dossier absent.
+  int64_t st1 = 0, st2 = 0, st3 = 0;
+  int r1 = pgs_stat(c, "Tel/2026 Novembre/IMG_1.jpg", &st1, err, sizeof(err));
+  int r2 = pgs_stat(c, "Tel/2026 Novembre/absent.jpg", &st2, err, sizeof(err));
+  int r3 = pgs_stat(c, "Tel/Pas de dossier/IMG_1.jpg", &st3, err, sizeof(err));
+  printf("stat présent=%lld (attendu %lld) absent=%lld dossier absent=%lld, codes %d %d %d, connexion %s\n",
+         (long long)st1, (long long)len, (long long)st2, (long long)st3, r1, r2, r3, pgs_alive(c) ? "ok" : "PERDUE");
   rc = pgs_md5_remote(c, "Tel/2026 Novembre/IMG_1.jpg", len, NULL, NULL, remote, err, sizeof(err));
   printf("md5 local=remote %d", rc == PGS_OK && strcmp(local, remote) == 0);
   rc = pgs_md5_remote(c, "Tel/nope.jpg", 5, NULL, NULL, remote, err, sizeof(err));

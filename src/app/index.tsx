@@ -6,8 +6,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, Pressable, Text, View } from 'react-native';
 
 import { preview, runBackup, stop, type BackupResult, type Progress } from '../engine';
-import { ago, lang, t } from '../i18n';
-import { folderFor, humanBytes, humanDuration, joinPath, MONTHS } from '../logic';
+import { ago, lang, periodLabel, t } from '../i18n';
+import { folderFor, humanBytes, humanDuration, joinPath } from '../logic';
 import { errorMessage, isDemo, Pg } from '../native';
 import { useApp } from '../state';
 import { Logo } from '../ui/Logo';
@@ -120,6 +120,7 @@ export default function Home() {
   const toSend = cmp ? cmp.missing.filter((m) => !excluded.has(m.id)) : [];
   const toSendBytes = toSend.reduce((n, m) => n + m.size, 0);
   const lastRun = app.history[0];
+  const isCustom = !['all', 'thisMonth', 'lastMonth'].includes(app.period.kind);
 
   async function backup() {
     if (!configured) return router.push('/pc');
@@ -320,13 +321,12 @@ export default function Home() {
       <Segmented<string>
         options={[
           ...(['all', 'thisMonth', 'lastMonth'] as const).map((k) => ({ value: k, label: t.periods[k] })),
-          ...(app.period.kind === 'month'
-            ? [{ value: 'month', label: t.monthLabel(MONTHS[lang][app.period.month - 1].slice(0, 4) + '.', app.period.year) }]
-            : []),
+          { value: 'custom', label: isCustom ? periodLabel(app.period) : t.custom },
         ]}
-        value={app.period.kind}
+        value={isCustom ? 'custom' : app.period.kind}
         onChange={(k) => {
           if (k === 'all' || k === 'thisMonth' || k === 'lastMonth') app.setPeriod({ kind: k });
+          else router.push('/period');
         }}
       />
 
@@ -378,6 +378,7 @@ export default function Home() {
               {cmp.renamed > 0 ? <Alert2 icon="alert" color={C.warn} text={t.cmpRenamed(cmp.renamed)} /> : null}
               {cmp.extraOnPc > 0 ? <Alert2 icon="information" color={C.muted} text={t.cmpExtra(cmp.extraOnPc)} /> : null}
               {!cmp.encrypted ? <Alert2 icon="lock-open-alert" color={C.warn} text={t.cmpNotEncrypted} /> : null}
+              {cmp.checkedOneByOne > 0 ? <Alert2 icon="magnify-scan" color={C.muted} text={t.cmpChecked(cmp.checkedOneByOne)} /> : null}
             </View>
           ) : null}
         </Card>
