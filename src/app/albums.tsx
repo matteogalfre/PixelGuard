@@ -1,14 +1,16 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Pressable, ScrollView, Text, View } from 'react-native';
+import { Pressable, Text, View } from 'react-native';
 
-import { lang, t } from '../i18n';
-import { humanBytes, MONTHS, type Kinds } from '../logic';
+import { router } from 'expo-router';
+
+import { lang, periodLabel, t } from '../i18n';
+import { humanBytes, type Kinds } from '../logic';
 import { useApp } from '../state';
-import { C, F, GRADIENT, Header, Screen, Segmented, t as ty, tap, Thumb } from '../ui/kit';
+import { C, Card, F, GRADIENT, Header, Screen, Segmented, t as ty, tap, Thumb } from '../ui/kit';
 
 export default function Sources() {
-  const { albums, selected, setSelected, kinds, setKinds, stats, period, setPeriod } = useApp();
+  const { albums, selected, setSelected, kinds, setKinds, stats, period } = useApp();
   const toggle = (id: string) => {
     tap();
     setSelected(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
@@ -26,44 +28,14 @@ export default function Sources() {
         onChange={setKinds}
       />
 
-      <Text style={[ty.label, { marginTop: 4 }]}>{t.whenLabel}</Text>
-      <Segmented<string>
-        options={(['all', 'thisMonth', 'lastMonth'] as const).map((k) => ({ value: k, label: t.periods[k] }))}
-        value={period.kind}
-        onChange={(k) => {
-          if (k === 'all' || k === 'thisMonth' || k === 'lastMonth') setPeriod({ kind: k });
-        }}
-      />
-      {stats?.months.length ? (
-        <>
-          <Text style={ty.small}>{t.pickMonth}</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
-            {stats.months.map((mo) => {
-              const on = period.kind === 'month' && period.year === mo.year && period.month === mo.month;
-              return (
-                <Pressable
-                  key={`${mo.year}-${mo.month}`}
-                  onPress={() => {
-                    tap();
-                    setPeriod({ kind: 'month', year: mo.year, month: mo.month });
-                  }}
-                  style={{
-                    paddingHorizontal: 14, paddingVertical: 10, borderRadius: 16, borderWidth: 1,
-                    borderColor: on ? C.accent : C.line, backgroundColor: on ? 'rgba(124,108,255,0.16)' : C.surface,
-                  }}
-                >
-                  <Text style={{ color: on ? C.accent : C.text, fontFamily: F.semi }}>
-                    {t.monthLabel(MONTHS[lang][mo.month - 1], mo.year)}
-                  </Text>
-                  <Text style={ty.small}>
-                    {mo.count} · {humanBytes(mo.bytes, lang)}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
-        </>
-      ) : null}
+      <Card onPress={() => router.push('/period')} style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
+        <MaterialCommunityIcons name="calendar-range" size={22} color={C.accent} />
+        <View style={{ flex: 1, gap: 2 }}>
+          <Text style={ty.label}>{t.periodRow}</Text>
+          <Text style={ty.h3}>{periodLabel(period)}</Text>
+        </View>
+        <MaterialCommunityIcons name="chevron-right" size={22} color={C.muted} />
+      </Card>
 
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
         <Text style={ty.label}>{t.albumsLabel}</Text>

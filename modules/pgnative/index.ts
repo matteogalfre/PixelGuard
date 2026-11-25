@@ -45,6 +45,8 @@ export type PgApi = {
   disconnect(): Promise<boolean>;
   list(dir: string): Promise<RemoteEntry[]>;
   mkdirs(dir: string): Promise<boolean>;
+  /** Taille lue sur chaque fichier (pas dans la liste du dossier), -1 s'il n'existe pas. */
+  statFiles(paths: string[]): Promise<number[]>;
   testWrite(dir: string): Promise<{ ok: boolean }>;
   speedTest(dir: string, megabytes: number): Promise<SpeedResult>;
   /** `sourceKey` identifie l'original : seul un « .part » écrit par lui peut être repris. */

@@ -110,6 +110,12 @@ Le test de vitesse de l'appli permet de comparer.
 - **Reprise** : un envoi coupé (Arrêter, Wi-Fi perdu) garde son `.part` s'il dépasse 8 Mo. Le téléphone note quel original l'a écrit (adresse du média, taille, date). La fois suivante, seul ce même original reprend là où il s'était arrêté, après comparaison des 64 derniers Ko. Un `.part` écrit par un autre fichier, même s'il lui ressemble, repart de zéro : le banc d'essai vérifie les deux cas.
 - **Anneau** : il n'affiche plus « 0 % à l'abri » à l'aveugle. Il montre la part déjà sur le PC d'après la dernière comparaison, et « ? » tant qu'on n'a pas comparé.
 
+## Premier essai sur un PC Windows (retours du 25/11)
+
+- **Débit chiffré plus bas que non chiffré.** Ce n'est pas la crypto du téléphone : smbj propose AES-GCM en premier, Windows l'accepte, et le téléphone le fait à 2,2 Go/s. Le surcoût vient de l'échange lui-même : en-têtes en plus, copies de paquets, déchiffrement côté Windows. Le texte de l'appli le dit maintenant, et on peut couper le chiffrement chez soi (les fichiers restent signés).
+- **Photos toujours « manquantes » après les avoir envoyées.** Hypothèse : la liste du dossier renvoyée par Windows est vide ou a des tailles périmées (NTFS met la taille à jour en différé dans la liste). Correctif : un fichier que l'index dit envoyé mais que la liste ne montre pas est vérifié directement sur le fichier (`statFiles`). Pareil avant d'envoyer un fichier en « nom (1) » parce que sa taille diffère. Pareil quand un nom est déjà pris au moment du renommage. L'accueil dit combien de fichiers ont dû être vérifiés un par un : c'est l'indice à regarder au prochain essai.
+- **Commande Windows** : elle ne marchait qu'en administrateur. Elle vérifie maintenant ses droits et se relance d'elle-même via la demande de Windows. Elle peut aussi être relancée sans erreur.
+
 ## Pistes pour plus tard
 
 - **Lecture en flux pour la vérification** : relire la copie en parallèle de la lecture locale (aujourd'hui c'est l'une après l'autre).
