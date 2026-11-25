@@ -50,3 +50,6 @@ modules/*/android/.cxx/
 
 # réglages locaux de l outil
 .claude/
+
+# APK construits en local
+dist/
