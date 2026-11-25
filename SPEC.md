@@ -1,4 +1,4 @@
-# PixelGuard pour Android : spec courte
+# PixelGuard pour Android et iPhone : spec courte
 
 ## Le besoin
 
@@ -21,7 +21,7 @@ Un dossier partagé Windows, à créer une fois. L'appli donne une ligne à coll
 
 ## Côté téléphone
 
-Appli Expo (React Native), Android seulement pour l'instant.
+Appli Expo (React Native), Android et iPhone, mêmes écrans et même JS.
 
 Une interface sombre, une seule action principale, en français ou en anglais selon le téléphone.
 
@@ -55,6 +55,20 @@ Une interface sombre, une seule action principale, en français ou en anglais se
 - Le détail des choix de vitesse est dans [AUDIT.md](AUDIT.md).
 - La logique pure (mois, noms, doublons) est en TypeScript sans dépendance, testée avec `node --test`.
 - Build APK en local (prebuild + gradlew), seulement sur demande.
+
+## iPhone
+
+Même appli, même JS. Seul le module natif change : `modules/pgnative/ios`, en Swift et en C, avec la même API (`PgApi`).
+
+- **Installation** : pas d'App Store. Build sur le Mac (Xcode), `.ipa` installée avec SideStore et un Apple ID gratuit, renouvelée toute seule tous les 7 jours. Les commandes sont dans le README.
+- **Galerie** : PhotoKit. Albums : la Pellicule (cochée au départ), les albums intelligents utiles (Captures d'écran, Selfies, Vidéos, Live Photos, Favoris...) et les albums créés. Une photo dans plusieurs albums ne part qu'une fois, avec l'album le plus précis.
+- **Fichiers envoyés** : l'original tel quel, octet pour octet (pas de conversion, la vérification MD5 reste possible). HEIC reste HEIC : Windows a besoin de l'extension HEIF (gratuite) pour l'afficher. Une Live Photo donne deux fichiers de même nom (`IMG_1234.HEIC` et `IMG_1234.MOV`), une photo retouchée donne l'original et `IMG_E1234.HEIC`, comme une copie par câble vers Windows. La vidéo d'une Live Photo suit la photo (filtre « Photos », dossier Photos).
+- **iCloud** : si « Optimiser le stockage » est actif, iOS télécharge l'original depuis iCloud avant l'envoi.
+- **SMB** : libsmb2 (LGPL-2.1+, compatible GPL-3.0), embarqué dans le module. `PgSmb.c` reprend `SmbCore.java` : 4 écritures en vol, `.part` puis renommage sans écraser, reprise d'un `.part` seulement s'il vient du même original, MD5 relu, liste des partages, nom NetBIOS. Signature exigée, chiffrement SMB 3 (AES-CCM, AES matériel ARMv8) si le PC le permet, sinon signé et l'appli le dit. Jusqu'à 4 connexions, une par envoi en parallèle.
+- **Découverte** : port 445 sur le /24 du Wi-Fi, nom NetBIOS ou DNS, adresses locales seulement. iOS demande l'accès au réseau local la première fois. Dans le simulateur, la recherche se limite au serveur de test local (`127.0.0.1:4445`) pour ne pas balayer le réseau du Mac.
+- **Libérer de la place** : `PHAssetChangeRequest.deleteAssets`, iOS demande confirmation et garde 30 jours dans « Supprimés récemment ». Une photo n'est supprimée que si tous ses fichiers sont vérifiés.
+- **Limites** : pas de sauvegarde longue en arrière-plan. L'écran reste allumé pendant l'envoi et l'appli le dit. Si on change d'appli, iOS laisse une trentaine de secondes : l'envoi s'arrête proprement et une vidéo coupée reprendra.
+- **Banc d'essai** : `modules/pgnative/ios-test/run.sh` teste `PgSmb.c` sur le Mac contre impacket (mêmes cas que `jvm-test`). `run.sh --serve` lance le serveur pour essayer l'appli dans le simulateur.
 
 ## Plus tard, pas dans le prototype
 

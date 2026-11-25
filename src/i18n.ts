@@ -1,8 +1,10 @@
 import { getLocales } from 'expo-localization';
+import { Platform } from 'react-native';
 
 import type { Lang } from './logic';
 
 const plural = (n: number, one: string, many: string) => (n > 1 ? many : one);
+const ios = Platform.OS === 'ios';
 
 /** Commande à coller dans un Terminal administrateur sur le PC Windows. */
 export const POWERSHELL =
@@ -140,7 +142,9 @@ const fr = {
   step1: 'Choisis ton PC',
   searching: 'Recherche sur le Wi-Fi…',
   found: (n: number) => `${n} ${plural(n, 'appareil trouvé', 'appareils trouvés')}`,
-  nothingFound: 'Aucun PC trouvé. Il est allumé, sur le même Wi-Fi, avec le dossier partagé ?',
+  nothingFound: ios
+    ? 'Aucun PC trouvé. Il est allumé, sur le même Wi-Fi, avec le dossier partagé ? Vérifie aussi que PixelGuard a accès au réseau local (Réglages › Confidentialité › Réseau local).'
+    : 'Aucun PC trouvé. Il est allumé, sur le même Wi-Fi, avec le dossier partagé ?',
   rescan: 'Relancer',
   manual: 'Saisir son adresse',
   hostPh: 'DESKTOP-XXXX ou 192.168.1.20',
@@ -176,7 +180,11 @@ const fr = {
   freeNone: "Rien à libérer pour l'instant. Lance d'abord une sauvegarde.",
   freeVerify: 'Vérifier et mettre à la corbeille',
   freeDifferent: (n: number) => `${n} ${plural(n, 'fichier diffère', 'fichiers diffèrent')} sur le PC : ${plural(n, 'gardé', 'gardés')} sur le téléphone.`,
-  freeDone: (n: number, size: string) => `${n} ${plural(n, 'fichier', 'fichiers')} à la corbeille (${size}). Récupérables 30 jours.`,
+  freeDone: (n: number, size: string) =>
+    ios
+      ? `${n} ${plural(n, 'fichier', 'fichiers')} dans « Supprimés récemment » (${size}). Récupérables 30 jours.`
+      : `${n} ${plural(n, 'fichier', 'fichiers')} à la corbeille (${size}). Récupérables 30 jours.`,
+  keepOpen: "Sur iPhone, garde PixelGuard ouvert : l'écran reste allumé pendant l'envoi. Si tu changes d'appli, l'envoi s'arrête proprement et reprendra là où il en était.",
   freeRefused: 'Rien supprimé.',
 };
 
@@ -310,7 +318,9 @@ const en: Dict = {
   step1: 'Pick your PC',
   searching: 'Searching your Wi-Fi…',
   found: (n) => `${n} ${plural(n, 'device found', 'devices found')}`,
-  nothingFound: 'No PC found. Is it on, on the same Wi-Fi, with the shared folder?',
+  nothingFound: ios
+    ? 'No PC found. Is it on, on the same Wi-Fi, with the shared folder? Also check that PixelGuard may use the local network (Settings › Privacy › Local Network).'
+    : 'No PC found. Is it on, on the same Wi-Fi, with the shared folder?',
   rescan: 'Search again',
   manual: 'Type its address',
   hostPh: 'DESKTOP-XXXX or 192.168.1.20',
@@ -346,7 +356,11 @@ const en: Dict = {
   freeNone: 'Nothing to free yet. Run a backup first.',
   freeVerify: 'Check and move to trash',
   freeDifferent: (n) => `${n} ${plural(n, 'file differs', 'files differ')} on the PC: kept on the phone.`,
-  freeDone: (n, size) => `${n} ${plural(n, 'file', 'files')} moved to trash (${size}). Recoverable for 30 days.`,
+  freeDone: (n, size) =>
+    ios
+      ? `${n} ${plural(n, 'file', 'files')} moved to Recently Deleted (${size}). Recoverable for 30 days.`
+      : `${n} ${plural(n, 'file', 'files')} moved to trash (${size}). Recoverable for 30 days.`,
+  keepOpen: 'On iPhone, keep PixelGuard open: the screen stays on during the backup. If you switch apps, the backup stops cleanly and picks up where it left off next time.',
   freeRefused: 'Nothing deleted.',
 };
 

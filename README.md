@@ -1,11 +1,12 @@
 <div align="center">
   <img src="assets/icon.png" width="140" height="140" alt="PixelGuard icon">
-  <h1>PixelGuard for Android</h1>
+  <h1>PixelGuard for Android and iPhone</h1>
   <p>Back up your phone's photos and videos to your PC over Wi-Fi. No cable, no cloud, no account.</p>
 
   <img alt="License" src="https://img.shields.io/github/license/matteogalfre/PixelGuard-mobile?color=7c6cff&style=flat-square">
   <img alt="Last commit" src="https://img.shields.io/github/last-commit/matteogalfre/PixelGuard-mobile?color=7c6cff&style=flat-square">
   <img alt="Android" src="https://img.shields.io/badge/platform-Android%2011+-7c6cff?style=flat-square">
+  <img alt="iPhone" src="https://img.shields.io/badge/platform-iOS%2016.4+-7c6cff?style=flat-square">
 </div>
 
 The phone app of [PixelGuard](https://github.com/matteogalfre/PixelGuard). The desktop app pulls photos from the phone over ADB; this one does it the other way around: the phone sends them to a shared folder on your PC, and nothing needs to be installed on the PC.
@@ -83,7 +84,35 @@ How it's organized:
 - [`src/app`](src/app): the screens (Expo Router)
 - [`src/logic.ts`](src/logic.ts): the rules shared with the desktop app (month from the file name, duplicates, `name (1).jpg`, sorting), tested with `npm test`
 - [`src/engine.ts`](src/engine.ts): compare with the PC, back up, free up space
-- [`modules/pgnative`](modules/pgnative): the native part, in Kotlin and Java. It reads the gallery, finds PCs, talks SMB through [smbj](https://github.com/hierynomus/smbj), and handles the Android trash. `jvm-test/run.sh` tests the SMB code against a local test server, no phone needed
+- [`modules/pgnative`](modules/pgnative): the native part. On Android, in Kotlin and Java: it reads the gallery, finds PCs, talks SMB through [smbj](https://github.com/hierynomus/smbj), and handles the Android trash. `jvm-test/run.sh` tests the SMB code against a local test server, no phone needed
+- [`modules/pgnative/ios`](modules/pgnative/ios): the same on iPhone, in Swift (PhotoKit) and C. `PgSmb.c` does what the Android SMB code does, on top of [libsmb2](https://github.com/sahlberg/libsmb2). `ios-test/run.sh` tests it on a Mac against the same kind of local server, and `ios-test/run.sh --serve` starts that server to try the app in the iOS Simulator (the address is `127.0.0.1:4445`, user `test`, password `test`)
+
+## iPhone
+
+The same app, with the same screens, runs on iPhone (iOS 16.4 or later). There is no App Store version: you build it on a Mac and install it with [SideStore](https://sidestore.io) and a free Apple ID.
+
+### Install it
+
+You need a Mac with Xcode, Node and CocoaPods, and SideStore already set up on the iPhone (see sidestore.io, it's done once).
+
+```bash
+npm install
+npx expo prebuild -p ios
+xcodebuild -workspace ios/PixelGuard.xcworkspace -scheme PixelGuard -configuration Release -sdk iphoneos -archivePath build/PixelGuard.xcarchive archive CODE_SIGNING_ALLOWED=NO
+mkdir -p build/Payload && cp -R build/PixelGuard.xcarchive/Products/Applications/PixelGuard.app build/Payload/ && (cd build && zip -qr PixelGuard.ipa Payload)
+```
+
+Send `build/PixelGuard.ipa` to the iPhone (AirDrop, Files), then open SideStore, tap **+** and pick it. With a free Apple ID an app is signed for 7 days: SideStore renews it by itself in the background, as long as it gets the chance to before the 7 days run out. You can also run it straight from Xcode with your Apple ID (plug the iPhone in, pick it, Run), but then the Mac has to sign it again every week.
+
+### What's different on iPhone
+
+- **Keep the app open while it backs up.** The screen stays on. iOS doesn't let an app keep a transfer to a shared folder going in the background: if you switch apps, the backup stops cleanly after a few seconds, and a video cut halfway picks up where it left off next time.
+- **Allow local network access** the first time (iOS asks when the app looks for your PC). Without it, no PC is found. You can change it in Settings › Privacy & Security › Local Network.
+- **Photos are copied as they are, byte for byte.** iPhone photos are usually HEIC and videos HEVC: Windows shows them with the free [HEIF Image Extensions](https://apps.microsoft.com/detail/9pmmsr1cgpwg) and the HEVC Video Extensions from the Microsoft Store. If you'd rather get JPEG from now on: Settings › Camera › Formats › Most Compatible.
+- **Live Photos** arrive as the photo and its short video with the same name (`IMG_1234.HEIC` and `IMG_1234.MOV`). A photo edited in the Photos app arrives twice: the original and the edited version (`IMG_E1234.HEIC`). That's the same as copying an iPhone to Windows with a cable.
+- **iCloud "Optimize iPhone Storage"**: photos that only live in iCloud are downloaded by iOS from iCloud before being sent to the PC. That's the only time anything leaves your home network, and it's between your iPhone and Apple.
+- **Freeing up space**: iOS asks for confirmation, then puts the photos in Recently Deleted (30 days). A photo only goes if all its files (photo, Live Photo video, edited version) were read back and match.
+- Encryption is SMB 3 with AES-CCM, using the iPhone's hardware AES.
 
 ## Feedback and contributions
 
@@ -91,7 +120,7 @@ How it's organized:
 
 ## Credits
 
-SMB is handled by [smbj](https://github.com/hierynomus/smbj) (Apache 2.0), with [Bouncy Castle](https://www.bouncycastle.org/) as a fallback for algorithms the phone doesn't have.
+SMB is handled by [smbj](https://github.com/hierynomus/smbj) (Apache 2.0) on Android, with [Bouncy Castle](https://www.bouncycastle.org/) as a fallback for algorithms the phone doesn't have, and by [libsmb2](https://github.com/sahlberg/libsmb2) (LGPL 2.1 or later, its source is in `modules/pgnative/ios/libsmb2`) on iPhone.
 
 ## License
 

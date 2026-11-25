@@ -3,7 +3,7 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import * as Network from 'expo-network';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Platform, Pressable, Text, View } from 'react-native';
 
 import { preview, runBackup, stop, type BackupResult, type Progress } from '../engine';
 import { ago, lang, t } from '../i18n';
@@ -200,6 +200,7 @@ export default function Home() {
           </View>
         ))}
 
+        {Platform.OS === 'ios' ? <Text style={[ty.small, { textAlign: 'center' }]}>{t.keepOpen}</Text> : null}
         <MainButton label={t.stop} kind="ghost" icon="stop-circle-outline" onPress={stop} />
       </Screen>
     );
