@@ -1,6 +1,8 @@
 {
-  "NSPhotoLibraryUsageDescription": "PixelGuard reads your photos to copy them to your PC.",
-  "NSPhotoLibraryAddUsageDescription": "PixelGuard doesn't create photos.",
-  "NSCameraUsageDescription": "PixelGuard reads the code shown by your PC to connect to it. No photo is taken.",
-  "NSLocalNetworkUsageDescription": "PixelGuard looks for your PC on your home Wi-Fi and copies your photos to it. Nothing leaves your network."
+  "ios": {
+    "NSPhotoLibraryUsageDescription": "PixelGuard reads your photos to copy them to your PC.",
+    "NSPhotoLibraryAddUsageDescription": "PixelGuard doesn't create photos.",
+    "NSCameraUsageDescription": "PixelGuard reads the code shown by your PC to connect to it. No photo is taken.",
+    "NSLocalNetworkUsageDescription": "PixelGuard looks for your PC on your home Wi-Fi and copies your photos to it. Nothing leaves your network."
+  }
 }
