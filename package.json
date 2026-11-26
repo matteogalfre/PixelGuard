@@ -1,6 +1,6 @@
 {
   "name": "pixelguard-mobile",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "main": "expo-router/entry",
   "dependencies": {
     "@expo-google-fonts/inter": "^0.4.2",
@@ -51,12 +51,8 @@
   "license": "GPL-3.0-or-later",
   "expo": {
     "autolinking": {
-      "exclude": [
-        "@expo/ui"
-      ],
       "android": {
         "exclude": [
-          "@expo/ui",
           "expo-camera"
         ]
       }
