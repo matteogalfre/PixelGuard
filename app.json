@@ -6,6 +6,14 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
+    "ios": {
+      "bundleIdentifier": "com.matteogalfre.pixelguard",
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "PixelGuard cherche ton PC sur le Wi-Fi de la maison et y copie tes photos. Rien ne sort de ton réseau.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#7C6CFF",
@@ -61,7 +69,8 @@
       ],
       "expo-router",
       "expo-image",
-      "expo-font"
+      "expo-font",
+      "./plugins/with-scene-delegate"
     ],
     "backgroundColor": "#0b1117",
     "scheme": "pixelguard",

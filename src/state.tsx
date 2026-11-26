@@ -96,8 +96,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const list = await Pg.listAlbums();
     setAlbums(list);
     const saved = await loadAlbums();
-    // Premier lancement : on coche l'appareil photo.
-    const ids = saved ?? list.filter((a) => /^DCIM\/Camera\/?$/i.test(a.path)).map((a) => a.id);
+    // Premier lancement : on coche l'appareil photo (la Pellicule sur iPhone).
+    const ids = saved ?? list.filter((a) => /^DCIM\/Camera\/?$/i.test(a.path) || a.path === 'photos://library').map((a) => a.id);
     // Même sélection : on garde le même tableau, sinon tout ce qui en dépend se relance.
     setSelectedState((prev) => (prev.length === ids.length && prev.every((x, i) => x === ids[i]) ? prev : ids));
     return ids;

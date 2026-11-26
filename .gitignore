@@ -42,6 +42,7 @@ yarn-error.*
 
 # banc d essai JVM
 modules/pgnative/jvm-test/.work/
+modules/pgnative/ios-test/.work/
 
 # sorties de build des modules natifs
 modules/*/android/build/
@@ -50,6 +51,9 @@ modules/*/android/.cxx/
 
 # réglages locaux de l outil
 .claude/
+
+# builds iPhone (.xcarchive, .ipa)
+/build/
 
 # APK construits en local
 dist/

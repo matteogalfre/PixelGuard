@@ -3,7 +3,7 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import * as Network from 'expo-network';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Platform, Pressable, Text, View } from 'react-native';
 
 import { preview, runBackup, stop, type BackupResult, type Progress } from '../engine';
 import { ago, lang, periodLabel, t } from '../i18n';
@@ -201,6 +201,7 @@ export default function Home() {
           </View>
         ))}
 
+        {Platform.OS === 'ios' ? <Text style={[ty.small, { textAlign: 'center' }]}>{t.keepOpen}</Text> : null}
         <MainButton label={t.stop} kind="ghost" icon="stop-circle-outline" onPress={stop} />
       </Screen>
     );
@@ -260,7 +261,8 @@ export default function Home() {
       <View style={{ alignItems: 'center', marginTop: 8 }}>
         <Ring value={ratio} size={230} stroke={16}>
           <Text style={ty.big}>{center}</Text>
-          <Text style={ty.small}>{caption}</Text>
+          {/* Reste dans le cercle : une légende longue passe sur deux lignes au lieu de mordre sur l'anneau. */}
+          <Text numberOfLines={2} style={[ty.small, { textAlign: 'center', maxWidth: 160 }]}>{caption}</Text>
         </Ring>
         {status ? <Text style={[ty.h3, { marginTop: 14, color: statusColor, textAlign: 'center' }]}>{status}</Text> : null}
         {lastRun ? (

@@ -1,7 +1,7 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useCallback, useEffect, useState } from 'react';
-import { Alert, Text, View } from 'react-native';
+import { Alert, Platform, Text, View } from 'react-native';
 
 import {
   findFreeCandidates,
@@ -97,6 +97,7 @@ export default function Free() {
             <Text style={[ty.mono, { flex: 1 }]} numberOfLines={1}>{current.name}</Text>
           </View>
         ) : null}
+        {Platform.OS === 'ios' ? <Text style={[ty.small, { textAlign: 'center' }]}>{t.keepOpen}</Text> : null}
         <MainButton label={t.stop} kind="ghost" icon="stop-circle-outline" onPress={stop} />
       </Screen>
     );
