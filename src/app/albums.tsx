@@ -1,4 +1,3 @@
-import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Pressable, Text, View } from 'react-native';
 
@@ -7,7 +6,7 @@ import { router } from 'expo-router';
 import { lang, periodLabel, t } from '../i18n';
 import { humanBytes, type Kinds } from '../logic';
 import { useApp } from '../state';
-import { C, Card, F, GRADIENT, Header, Screen, Segmented, t as ty, tap, Thumb } from '../ui/kit';
+import { Icon, C, Card, F, GRADIENT, Header, Screen, Segmented, t as ty, tap, Thumb } from '../ui/kit';
 
 export default function Sources() {
   const { albums, selected, setSelected, kinds, setKinds, stats, period } = useApp();
@@ -29,12 +28,12 @@ export default function Sources() {
       />
 
       <Card onPress={() => router.push('/period')} style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
-        <MaterialCommunityIcons name="calendar-range" size={22} color={C.accent} />
+        <Icon name="calendar-range" size={22} color={C.accent} />
         <View style={{ flex: 1, gap: 2 }}>
           <Text style={ty.label}>{t.periodRow}</Text>
           <Text style={ty.h3}>{periodLabel(period)}</Text>
         </View>
-        <MaterialCommunityIcons name="chevron-right" size={22} color={C.muted} />
+        <Icon name="chevron-right" size={22} color={C.muted} />
       </Card>
 
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
@@ -44,7 +43,8 @@ export default function Sources() {
             tap();
             setSelected(allOn ? [] : albums.map((a) => a.id));
           }}
-          hitSlop={8}
+          accessibilityRole="button"
+          hitSlop={12}
         >
           <Text style={[ty.small, { color: C.accent, fontFamily: F.semi }]}>{allOn ? t.none : t.all}</Text>
         </Pressable>
@@ -62,6 +62,9 @@ export default function Sources() {
             <Pressable
               key={a.id}
               onPress={() => toggle(a.id)}
+              accessibilityRole="checkbox"
+              accessibilityState={{ checked: on }}
+              accessibilityLabel={`${a.name}, ${a.count}`}
               style={({ pressed }) => ({
                 width: '48%',
                 aspectRatio: 1,
@@ -78,7 +81,7 @@ export default function Sources() {
                 colors={['transparent', 'rgba(0,0,0,0.85)']}
                 style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: 12, paddingTop: 40 }}
               >
-                <Text style={{ color: C.text, fontFamily: F.bold, fontSize: 15 }} numberOfLines={1}>
+                <Text style={{ color: '#FFFFFF', fontFamily: F.bold, fontSize: 15 }} numberOfLines={1}>
                   {a.name || '—'}
                 </Text>
                 <Text style={[ty.small, { color: 'rgba(255,255,255,0.7)' }]} numberOfLines={1}>
@@ -88,7 +91,7 @@ export default function Sources() {
               <View style={{ position: 'absolute', top: 10, right: 10 }}>
                 {on ? (
                   <LinearGradient colors={GRADIENT} style={{ width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' }}>
-                    <MaterialCommunityIcons name="check" size={18} color="#FFFFFF" />
+                    <Icon name="check" size={18} color="#FFFFFF" />
                   </LinearGradient>
                 ) : (
                   <View style={{ width: 28, height: 28, borderRadius: 14, borderWidth: 2, borderColor: 'rgba(255,255,255,0.7)' }} />

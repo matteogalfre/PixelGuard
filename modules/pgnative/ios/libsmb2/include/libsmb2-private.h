@@ -232,6 +232,11 @@ struct smb2_context {
         char client_guid[16];
         char server_guid[16];
 
+        /* PixelGuard : nom NetBIOS annoncé par le PC dans le défi NTLM, nom attendu, et refus. */
+        char pg_server_name[64];
+        char pg_expected_name[64];
+        int pg_name_mismatch;
+
         uint32_t tree_id[SMB2_MAX_TREE_NESTING];
         int  tree_id_top;
         int  tree_id_cur;

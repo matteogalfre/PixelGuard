@@ -33,6 +33,7 @@
 
 #ifdef HAVE_STRING_H
 #include <string.h>
+#include <strings.h>
 #endif
 
 #ifdef STDC_HEADERS
@@ -402,6 +403,8 @@ ntlm_decode_challenge_message(struct smb2_context *smb2, struct auth_data *auth_
                         return -1;
                 }
 
+                smb2->pg_server_name[0] = 0;
+
                 /* form destination SPN in case server is checking */
                 free(auth_data->target_info);
                 alloc_len = 32 + strlen(smb2->server);
@@ -523,6 +526,16 @@ ntlm_decode_challenge_message(struct smb2_context *smb2, struct auth_data *auth_
                                         attr_code = 0;
                                         attr_len = 0;
                                 } else {
+                                        if (attr_code == 1 && attr_len > 0) {
+                                                /* PixelGuard : MsvAvNbComputerName */
+                                                char *nb = discard_const(smb2_utf16_to_utf8(
+                                                        (const uint16_t *)(void *)&buf[inoff + 4], attr_len / 2));
+                                                if (nb != NULL) {
+                                                        snprintf(smb2->pg_server_name,
+                                                                 sizeof(smb2->pg_server_name), "%s", nb);
+                                                        free(nb);
+                                                }
+                                        }
                                         u16 = htole16(attr_code);
                                         memcpy(&auth_data->ntlm_buf[outoff], &u16, 2);
                                         u16 = htole16(attr_len);
@@ -1274,6 +1287,15 @@ ntlmssp_generate_blob(struct smb2_server *server, struct smb2_context *smb2, tim
                                 if (ntlm_decode_challenge_message(smb2, auth_data,
                                                 ntlmssp, ntlmssp_len) < 0) {
                                         smb2_set_error(smb2, "can not decode challenge");
+                                        return -1;
+                                }
+                                /* PixelGuard : un autre PC que celui appairé ? On s'arrête
+                                 * avant de lui envoyer l'utilisateur et la réponse NTLM. */
+                                if (smb2->pg_expected_name[0] &&
+                                    strcasecmp(smb2->pg_expected_name, smb2->pg_server_name) != 0) {
+                                        smb2->pg_name_mismatch = 1;
+                                        smb2_set_error(smb2, "PixelGuard: the server announced "
+                                                       "another name (%s)", smb2->pg_server_name);
                                         return -1;
                                 }
                                 if (auth_data->domain == NULL && auth_data->target_name) {

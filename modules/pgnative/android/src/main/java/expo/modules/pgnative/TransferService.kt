@@ -22,16 +22,23 @@ class TransferService : Service() {
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     if (intent?.action == ACTION_STOP) {
-      onStopRequested?.invoke()
+      onStopRequested?.invoke("user")
       return START_NOT_STICKY
     }
     val title = intent?.getStringExtra(EXTRA_TITLE) ?: ""
     val text = intent?.getStringExtra(EXTRA_TEXT) ?: ""
     val notification = build(this, title, text, 0, 0, true)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-      startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-    } else {
-      startForeground(NOTIFICATION_ID, notification)
+    try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+      } else {
+        startForeground(NOTIFICATION_ID, notification)
+      }
+    } catch (e: Exception) {
+      // Refusé (Android 15 : les 6 h du jour sont déjà prises) : la sauvegarde continue tant que
+      // l'appli reste ouverte, sans service.
+      stopSelf()
+      return START_NOT_STICKY
     }
     if (wakeLock == null) {
       val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -41,6 +48,13 @@ class TransferService : Service() {
       }
     }
     return START_NOT_STICKY
+  }
+
+  // Android 15 : un service « dataSync » a 6 h par jour. Au bout, il doit s'arrêter tout de suite,
+  // sinon Android ferme l'appli. On arrête proprement la sauvegarde, qui pourra reprendre.
+  override fun onTimeout(startId: Int, fgsType: Int) {
+    onStopRequested?.invoke("timeout")
+    stopSelf()
   }
 
   override fun onDestroy() {
@@ -58,7 +72,8 @@ class TransferService : Service() {
     const val EXTRA_TEXT = "text"
 
     /** Branché par le module : « Arrêter » dans la notification. */
-    var onStopRequested: (() -> Unit)? = null
+    /** « user » : bouton de la notification ; « timeout » : limite de 6 h d'Android 15. */
+    var onStopRequested: ((String) -> Unit)? = null
     var stopLabel: String = "Stop"
 
     fun ensureChannel(context: Context, name: String) {

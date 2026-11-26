@@ -25,7 +25,12 @@ enum {
   PGS_EXISTS = 7,     // nom déjà pris au renommage
   PGS_CANCELLED = 8,
   PGS_NOT_FOUND = 9,
+  PGS_NOT_ENCRYPTED = 10, // chiffrement exigé, mais le PC ne sait pas (SMB 2) ou refuse
+  PGS_PC_CHANGED = 11,    // le PC annonce un autre nom que celui appairé : rien n'a été envoyé
 };
+
+/** Chiffrement demandé à pgs_connect2. */
+enum { PGS_SEAL_NO = 0, PGS_SEAL_MUST = 1, PGS_SEAL_IF_POSSIBLE = 2 };
 
 /** 1 Mo par écriture SMB (moins si le PC l'impose), 4 écritures en vol par fichier. */
 #define PGS_CHUNK (1 << 20)
@@ -48,6 +53,18 @@ typedef struct {
  */
 int pgs_connect(const char *server, const char *share, const char *domain, const char *user,
                 const char *password, int encrypt, pgs_conn **out, char *err, size_t errlen);
+/**
+ * Comme pgs_connect, avec :
+ * - `seal` : PGS_SEAL_MUST refuse une connexion non chiffrée (PGS_NOT_ENCRYPTED) au lieu de
+ *   continuer seulement signé ; PGS_SEAL_IF_POSSIBLE (appairage) continue signé ;
+ * - `expected_name` : nom NetBIOS que le PC doit annoncer dans le défi NTLM (NULL ou "" : pas
+ *   de contrôle). Un autre nom donne PGS_PC_CHANGED, avant d'envoyer l'utilisateur et la
+ *   réponse au mot de passe ;
+ * - `seen` : reçoit le nom annoncé par le PC ("" s'il n'en annonce pas).
+ */
+int pgs_connect2(const char *server, const char *share, const char *domain, const char *user,
+                 const char *password, int seal, const char *expected_name, char *seen, size_t seenlen,
+                 pgs_conn **out, char *err, size_t errlen);
 void pgs_close(pgs_conn *c);
 /** La connexion tient encore (pas de coupure vue). */
 int pgs_alive(pgs_conn *c);

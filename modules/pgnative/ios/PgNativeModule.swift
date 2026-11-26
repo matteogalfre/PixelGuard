@@ -8,6 +8,16 @@ struct SmbSettingsRecord: Record {
   @Field var user: String = ""
   @Field var password: String = ""
   @Field var encrypt: Bool = true
+  /** Nom NetBIOS du PC appairé ("" : pas encore connu). */
+  @Field var identity: String = ""
+}
+
+/** Une page donnée par le petit serveur web (le fichier de préparation, et sa page). */
+struct ServedPageRecord: Record {
+  @Field var path: String = "/"
+  @Field var type: String = "text/plain"
+  @Field var body: String = ""
+  @Field var download: String = ""
 }
 
 struct PgError: Error {
@@ -33,6 +43,7 @@ public final class PgNativeModule: Module {
   private let work = DispatchQueue(label: "pixelguard.work", qos: .userInitiated, attributes: .concurrent)
   private let smb = SmbPool()
   private let gallery = Gallery()
+  private let watch = LibraryWatch()
   private let cancelled = Flag()
   private let resume = ResumeStore()
   private let bgLock = NSLock()
@@ -50,6 +61,10 @@ public final class PgNativeModule: Module {
 
     AsyncFunction("listMedia") { (bucketIds: [String], promise: Promise) in
       self.run(promise) { try self.gallery.media(bucketIds) }
+    }
+
+    AsyncFunction("galleryVersion") { (promise: Promise) in
+      self.run(promise) { self.watch.version() }
     }
 
     // ---------- Trouver le PC
@@ -130,11 +145,13 @@ public final class PgNativeModule: Module {
 
     AsyncFunction("removeFromPhone") { (uris: [String], _: Bool, promise: Promise) in
       // iOS demande lui-même la confirmation et range tout dans « Supprimés récemment » (30 jours).
-      self.gallery.remove(uris) { ok, error in
+      // Renvoie les uri vraiment supprimées : une photo gardée (fichier pas vérifié, rafale
+      // incomplète) doit rester connue comme « sur le PC ».
+      self.gallery.remove(uris) { removed, error in
         if let error = error as? PgError {
           promise.reject(error.code, error.message)
         } else {
-          promise.resolve(ok)
+          promise.resolve(removed)
         }
       }
     }
@@ -155,7 +172,34 @@ public final class PgNativeModule: Module {
       }
     }
 
+    // Le téléphone donne « Prepare my PC » au navigateur du PC, le temps de la préparation.
+    AsyncFunction("startPrepServer") { (pages: [ServedPageRecord], promise: Promise) in
+      self.run(promise) {
+        pgh_stop()
+        pgh_clear()
+        for p in pages {
+          let bytes = Array(p.body.utf8)
+          _ = bytes.withUnsafeBufferPointer { buf in pgh_add(p.path, p.type, p.download, buf.baseAddress, buf.count) }
+        }
+        let port = pgh_start(8800)
+        if port < 0 { throw PgError("SERVER", "Impossible de proposer le fichier sur le Wi-Fi") }
+        var ip = [CChar](repeating: 0, count: 64)
+        pgh_local_ipv4(&ip, ip.count)
+        let address = String(cString: ip)
+        let result: [String: Any] = ["ip": address.isEmpty ? (NSNull() as Any) : (address as Any), "port": Int(port)]
+        return result
+      }
+    }
+
+    AsyncFunction("stopPrepServer") { (promise: Promise) in
+      self.run(promise) {
+        pgh_stop()
+        return true
+      }
+    }
+
     OnDestroy {
+      pgh_stop()
       self.endBackground()
       self.smb.closeAll()
     }
@@ -175,7 +219,7 @@ public final class PgNativeModule: Module {
   }
 
   private static func target(_ s: SmbSettingsRecord) -> SmbTarget {
-    SmbTarget(host: s.host, share: s.share, user: s.user, password: s.password, encrypt: s.encrypt)
+    SmbTarget(host: s.host, share: s.share, user: s.user, password: s.password, encrypt: s.encrypt, identity: s.identity)
   }
 
   private func upload(_ uri: String, _ remotePath: String, _ size: Int64, _ transferId: String, _ sourceKey: String) throws -> [String: Any] {
@@ -241,7 +285,7 @@ public final class PgNativeModule: Module {
       self.bgTask = UIApplication.shared.beginBackgroundTask(withName: "pixelguard-backup") { [weak self] in
         guard let self else { return }
         self.cancelled.set(true)
-        self.sendEvent("onStopRequested", [:])
+        self.sendEvent("onStopRequested", ["reason": "background"])
         self.endBackground()
       }
     }

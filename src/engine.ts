@@ -9,6 +9,7 @@ import {
   keepKind,
   monthsOf,
   plan,
+  retryOnce,
   sanitizeSegment,
   variantKey as variantKeyOf,
   targetFolders,
@@ -17,12 +18,14 @@ import {
   type Lang,
   type MonthCount,
   type PlanEntry,
+  type Pairing,
   type Period,
   type Sorting,
 } from './logic';
-import { t } from './i18n';
-import { errorCode, errorMessage, Pg, type MediaItem } from './native';
-import { loadIndex, saveIndex, type CopyIndex, type PcSettings } from './store';
+import { galleryMedia } from './gallery';
+import { lang as phoneLang, t } from './i18n';
+import { errorCode, errorMessage, Pg, type LoginInfo, type MediaItem } from './native';
+import { emptySettings, loadIndex, patchIndex, rememberIdentity, type CopyIndex, type PcSettings } from './store';
 
 export type Phase = 'connect' | 'scan' | 'compare' | 'send' | 'verify' | 'done';
 
@@ -71,8 +74,39 @@ export function stop(): void {
   Pg.cancel();
 }
 
-function connect(pc: PcSettings, password: string) {
-  return Pg.connect({ host: pc.host, share: pc.share, user: pc.user, password, encrypt: pc.encrypt });
+/**
+ * Tailles lues fichier par fichier, par lots : sur une grosse galerie ça fait des milliers
+ * d'allers-retours, donc l'avancement s'affiche et Arrêter est pris en compte entre deux lots.
+ */
+async function statInBatches(paths: string[], onDetail: (d: string) => void): Promise<number[]> {
+  const out: number[] = [];
+  for (let i = 0; i < paths.length; i += 200) {
+    if (stopRequested) throw Object.assign(new Error(t.stopped), { code: 'CANCELLED' });
+    out.push(...(await again(() => Pg.statFiles(paths.slice(i, i + 200)))));
+    if (paths.length > 200) onDetail(t.checkingOne(Math.min(i + 200, paths.length), paths.length));
+  }
+  return out;
+}
+
+/** Une coupure en route : un nouvel essai, sur une connexion neuve (sauf si on a demandé l'arrêt). */
+const again = <T>(op: () => Promise<T>) => retryOnce(op, (e) => errorCode(e) === 'CONNECTION' && !stopRequested);
+
+let identityListener: ((pcId: string, identity: string) => void) | null = null;
+
+/** Prévenu quand un PC enregistré avant le contrôle du nom vient d'être identifié. */
+export function onPcIdentified(fn: ((pcId: string, identity: string) => void) | null): void {
+  identityListener = fn;
+}
+
+async function connect(pc: PcSettings, password: string) {
+  const info = await Pg.connect({
+    host: pc.host, share: pc.share, user: pc.user, password, encrypt: pc.encrypt, identity: pc.identity ?? '',
+  });
+  if (pc.id && !pc.identity && info.identity) {
+    await rememberIdentity(pc.id, info.identity);
+    identityListener?.(pc.id, info.identity);
+  }
+  return info;
 }
 
 /** Ajoute (ou corrige) un fichier dans l'état d'un dossier. */
@@ -127,7 +161,7 @@ export type Stats = {
 };
 
 async function sourceItems(albumIds: string[], kinds: Kinds): Promise<MediaItem[]> {
-  return (await Pg.listMedia(albumIds)).filter((m) => keepKind(m, kinds));
+  return (await galleryMedia(albumIds)).filter((m) => keepKind(m, kinds));
 }
 
 /** Ce qui est déjà sur le PC d'après les sauvegardes passées, sans toucher au réseau. */
@@ -155,6 +189,8 @@ export async function stats(albumIds: string[], kinds: Kinds, period: Period, pc
 
 export type Comparison = {
   index: CopyIndex;
+  /** Ce que la comparaison a trouvé sur le PC et que l'index ne savait pas encore. */
+  found: CopyIndex;
   entries: PlanEntry<MediaItem>[];
   /** À envoyer, avec le nom qu'ils auront sur le PC. */
   uploads: PlanEntry<MediaItem>[];
@@ -187,7 +223,10 @@ type Selection = {
  * pas ce qui est déjà sur le PC.
  */
 async function compareWithPc(opts: Selection, onDetail: (d: string) => void): Promise<Comparison> {
-  const { pc, lang } = opts;
+  const { pc } = opts;
+  // Les noms de dossiers suivent la langue fixée pour ce PC, pas celle du téléphone.
+  const lang = pc.lang ?? opts.lang;
+  const found: CopyIndex = {};
   const items = (await sourceItems(opts.albumIds, opts.kinds)).filter(
     (m) => inPeriod(m, opts.period) && !opts.exclude?.has(m.id),
   );
@@ -203,7 +242,7 @@ async function compareWithPc(opts: Selection, onDetail: (d: string) => void): Pr
   const all = [...dirs];
   let listed = 0;
   await pool(all, 4, async (d) => {
-    const entries = await Pg.list(d);
+    const entries = await again(() => Pg.list(d));
     states.set(d, folderState(entries.filter((e) => !e.dir)));
     onDetail(`${++listed} / ${all.length}`);
   });
@@ -242,7 +281,7 @@ async function compareWithPc(opts: Selection, onDetail: (d: string) => void): Pr
     fresh.push(m);
   }
   if (doubtful.length) {
-    const sizes = await Pg.statFiles(doubtful.map((d) => d.path));
+    const sizes = await statInBatches(doubtful.map((d) => d.path), onDetail);
     doubtful.forEach(({ m, path }, i) => {
       if (sizes[i] === m.size) {
         already++;
@@ -267,7 +306,7 @@ async function compareWithPc(opts: Selection, onDetail: (d: string) => void): Pr
     }
   }
   if (recheck.length) {
-    const sizes = await Pg.statFiles(recheck.map((r) => r.path));
+    const sizes = await statInBatches(recheck.map((r) => r.path), onDetail);
     recheck.forEach((r, i) => {
       if (sizes[i] >= 0 && sizes[i] !== r.f.size) {
         r.f.size = sizes[i];
@@ -285,6 +324,7 @@ async function compareWithPc(opts: Selection, onDetail: (d: string) => void): Pr
     const path = joinPath(pc.folder, e.folder, e.remoteName);
     if (e.action === 'skip') {
       index[e.item.id] = { path, size: e.item.size };
+      found[e.item.id] = { path, size: e.item.size };
       already++;
       alreadyBytes += e.item.size;
       match(path);
@@ -297,10 +337,10 @@ async function compareWithPc(opts: Selection, onDetail: (d: string) => void): Pr
   before.forEach((count, d) => {
     extraOnPc += Math.max(0, count - (matched.get(d)?.size ?? 0));
   });
-  return { index, entries, uploads, already, alreadyBytes, renamed, extraOnPc, checkedOneByOne, folders: targets };
+  return { index, found, entries, uploads, already, alreadyBytes, renamed, extraOnPc, checkedOneByOne, folders: targets };
 }
 
-export type Preview = Omit<Comparison, 'index' | 'entries' | 'uploads'> & {
+export type Preview = Omit<Comparison, 'index' | 'found' | 'entries' | 'uploads'> & {
   missing: MediaItem[];
   missingBytes: number;
   total: number;
@@ -313,9 +353,9 @@ export async function preview(opts: Selection & { password: string }): Promise<P
   Pg.resetCancel();
   const info = await connect(opts.pc, opts.password);
   const cmp = await compareWithPc(opts, () => {});
-  await saveIndex(opts.pc.id, cmp.index); // ce qu'on a vu sur le PC sert aussi à l'anneau
+  await patchIndex(opts.pc.id, { set: cmp.found }); // ce qu'on a vu sur le PC sert aussi à l'anneau
   const missing = cmp.uploads.map((e) => e.item);
-  const { index: _i, entries: _e, uploads: _u, ...rest } = cmp;
+  const { index: _i, found: _f, entries: _e, uploads: _u, ...rest } = cmp;
   return {
     ...rest,
     missing,
@@ -336,11 +376,15 @@ export async function runBackup(
   const errors: string[] = [];
   onProgress({ ...p });
 
-  const info = await connect(pc, opts.password);
+  // Service de premier plan dès le départ : écran éteint, même la connexion et la comparaison
+  // continuent, avec la notification et son bouton Arrêter.
+  Pg.startTransferService(t.notifTitle, t.phase.connect, t.stop);
+  let stopReason = '';
+  const stopSub = Pg.addListener('onStopRequested', (e) => {
+    stopReason = e?.reason ?? '';
+    stop();
+  });
   Pg.holdWifi(true);
-  // Service de premier plan : la sauvegarde continue écran éteint, avec sa notification.
-  Pg.startTransferService(t.notifTitle, t.phase.compare, t.stop);
-  const stopSub = Pg.addListener('onStopRequested', () => stop());
   let lastNotif = 0;
   const notify = (force = false) => {
     const now = Date.now();
@@ -354,11 +398,32 @@ export async function runBackup(
   };
   let finalText = '';
   try {
+    const info = await connect(pc, opts.password);
     p.phase = 'scan';
     onProgress({ ...p });
     const cmp = await compareWithPc(opts, (detail) => onProgress({ ...p, phase: 'compare', detail }));
-    const { index, entries } = cmp;
+    const { index } = cmp;
     const uploads = cmp.uploads;
+    // Ce qu'on apprend pendant l'envoi, enregistré par petits lots sur la dernière version.
+    let pending: CopyIndex = { ...cmp.found };
+    const remember = (id: string, path: string, size: number) => {
+      index[id] = { path, size };
+      pending[id] = { path, size };
+    };
+    const flush = async () => {
+      const batch = pending;
+      pending = {};
+      await patchIndex(pc.id, { set: batch });
+    };
+    // Les noms que les envois de cette sauvegarde vont prendre, par dossier : un fichier qui doit
+    // changer de nom en route n'en prend jamais un déjà promis à un autre.
+    const reserved = new Map<string, Set<string>>();
+    const reserve = (folder: string, name: string) => {
+      const set = reserved.get(folder) ?? new Set<string>();
+      set.add(name.toLowerCase());
+      reserved.set(folder, set);
+    };
+    for (const u of uploads) reserve(u.folder, u.remoteName);
     p.skipped = cmp.already;
     p.totalFiles = uploads.length;
     p.totalBytes = uploads.reduce((s, e) => s + e.item.size, 0);
@@ -367,7 +432,7 @@ export async function runBackup(
     onProgress({ ...p });
 
     await pool([...new Set(uploads.map((e) => e.folder))], 4, async (f) => {
-      await Pg.mkdirs(joinPath(pc.folder, f));
+      await again(() => Pg.mkdirs(joinPath(pc.folder, f)));
     });
 
     const live = new Map<string, Live>();
@@ -398,42 +463,53 @@ export async function runBackup(
 
     let cancelled = false;
     let sinceSave = 0;
+    let lastSave = Date.now();
     try {
       await pool(uploads, PARALLEL, async (e, i) => {
         const id = String(i);
         live.set(id, { id, name: e.item.name, uri: e.item.uri, size: e.item.size, bytes: 0 });
-        emit(true);
+        // Pas d'affichage forcé par fichier : avec des centaines de petites photos par seconde,
+        // l'écran se redessinerait sans arrêt. Quatre fois par seconde suffisent.
+        emit();
         try {
           let target = joinPath(pc.folder, e.folder, e.remoteName);
           try {
-            await Pg.upload(e.item.uri, target, e.item.size, id, sourceKey(e.item));
+            await again(() => Pg.upload(e.item.uri, target, e.item.size, id, sourceKey(e.item)));
           } catch (err) {
             if (errorCode(err) !== 'EXISTS') throw err;
             // Ce nom est déjà pris sur le PC : si c'est ce fichier (même taille, lue sur le
             // fichier lui-même), il est déjà là. Sinon on relit le dossier pour un nom libre.
-            const [onPc] = await Pg.statFiles([target]);
+            const [onPc] = await again(() => Pg.statFiles([target]));
             if (onPc === e.item.size) {
               p.skipped++;
-              index[e.item.id] = { path: target, size: e.item.size };
+              remember(e.item.id, target, e.item.size);
               return;
             }
-            const fresh = folderState((await Pg.list(joinPath(pc.folder, e.folder))).filter((x) => !x.dir));
+            const fresh = folderState((await again(() => Pg.list(joinPath(pc.folder, e.folder)))).filter((x) => !x.dir));
             upsertRemote(fresh, { name: e.remoteName, size: onPc });
+            for (const name of reserved.get(e.folder) ?? []) {
+              // taille impossible : un nom promis n'est jamais pris pour « déjà là »
+              if (!fresh.names.has(name)) addToFolder(fresh, { name, size: -2 });
+            }
             const d = decide(e.item.name, e.item.size, fresh);
             target = joinPath(pc.folder, e.folder, d.remoteName);
             if (d.action === 'skip') {
               p.skipped++;
-              index[e.item.id] = { path: target, size: e.item.size };
+              remember(e.item.id, target, e.item.size);
               return;
             }
-            await Pg.upload(e.item.uri, target, e.item.size, id, sourceKey(e.item));
+            reserve(e.folder, d.remoteName);
+            await again(() => Pg.upload(e.item.uri, target, e.item.size, id, sourceKey(e.item)));
           }
           p.uploaded++;
           networkBytes += e.item.size;
-          index[e.item.id] = { path: target, size: e.item.size };
-          if (++sinceSave >= 25) {
+          remember(e.item.id, target, e.item.size);
+          // Écrit de temps en temps (une coupure ne fait perdre que ça), sans faire attendre
+          // l'envoi suivant : l'index d'une grosse galerie pèse plusieurs Mo.
+          if (++sinceSave >= 200 || Date.now() - lastSave > 20_000) {
             sinceSave = 0;
-            await saveIndex(pc.id, index);
+            lastSave = Date.now();
+            flush().catch(() => {});
           }
         } catch (err) {
           if (errorCode(err) === 'CANCELLED' || stopRequested) {
@@ -446,19 +522,22 @@ export async function runBackup(
           live.delete(id);
           finishedBytes += e.item.size;
           p.doneFiles++;
-          emit(true);
+          emit();
         }
       });
     } finally {
       sub.remove();
-      await saveIndex(pc.id, index);
+      await flush();
     }
+    emit(true); // les derniers chiffres, exacts
 
     cancelled = cancelled || stopRequested;
     p.phase = 'done';
     p.live = [];
     onProgress({ ...p });
-    finalText = cancelled ? t.stopped : t.result(p.uploaded, p.skipped, p.failed);
+    const limit = stopReason === 'timeout' ? t.stoppedTimeout : stopReason === 'background' ? t.stoppedBackground : '';
+    if (limit) errors.unshift(limit);
+    finalText = cancelled ? limit || t.stopped : t.result(p.uploaded, p.skipped, p.failed);
     return {
       uploaded: p.uploaded,
       skipped: p.skipped,
@@ -502,8 +581,11 @@ export async function verifyCandidates(opts: {
 }): Promise<{ same: FreeCandidate[]; different: string[]; cancelled: boolean }> {
   stopRequested = false;
   Pg.resetCancel();
-  await connect(opts.pc, opts.password);
+  // Relire des Go de vidéos prend du temps : elle aussi continue écran éteint.
+  Pg.startTransferService(t.notifVerifyTitle, t.phase.connect, t.stop);
+  const stopSub = Pg.addListener('onStopRequested', () => stop());
   Pg.holdWifi(true);
+  let finalText = '';
   const p = emptyProgress('verify');
   p.totalFiles = opts.candidates.length;
   p.totalBytes = opts.candidates.reduce((s, c) => s + c.item.size, 0);
@@ -511,10 +593,13 @@ export async function verifyCandidates(opts: {
   const same: FreeCandidate[] = [];
   const different: string[] = [];
   opts.onProgress({ ...p });
+  let lastNotif = 0;
+  let lastShown = 0;
   try {
+    await connect(opts.pc, opts.password);
     await pool(opts.candidates, PARALLEL, async (c) => {
       try {
-        const r = await Pg.verify(c.item.uri, c.path, c.item.size);
+        const r = await again(() => Pg.verify(c.item.uri, c.path, c.item.size));
         if (r.same) same.push(c);
         else different.push(c.item.name);
       } catch (err) {
@@ -525,23 +610,71 @@ export async function verifyCandidates(opts: {
       p.speed = meter(p.doneBytes);
       p.eta = p.speed > 1024 ? (p.totalBytes - p.doneBytes) / p.speed : 0;
       p.live = [{ id: c.item.id, name: c.item.name, uri: c.item.uri, size: c.item.size, bytes: c.item.size }];
-      opts.onProgress({ ...p });
+      const now = Date.now();
+      if (now - lastShown > 250 || p.doneFiles === p.totalFiles) {
+        lastShown = now;
+        opts.onProgress({ ...p });
+      }
+      if (now - lastNotif > 1000) {
+        lastNotif = now;
+        Pg.updateTransferService(
+          t.notifProgress(p.doneFiles, p.totalFiles, humanBytes(p.speed, phoneLang)),
+          p.totalBytes ? Math.round((p.doneBytes / p.totalBytes) * 1000) : 0,
+          1000,
+        );
+      }
     });
+    finalText = stopRequested ? t.stopped : same.length ? t.notifVerifyDone(same.length) : '';
   } finally {
     Pg.holdWifi(false);
+    stopSub.remove();
+    Pg.stopTransferService(t.notifVerifyTitle, finalText);
   }
   return { same, different, cancelled: stopRequested };
 }
 
-/** Android affiche lui-même la confirmation, puis met à la corbeille (30 jours). */
-export async function moveToTrash(pcId: string, verified: FreeCandidate[]): Promise<boolean> {
-  const ok = await Pg.removeFromPhone(verified.map((c) => c.item.uri), true);
-  if (ok) {
-    const index = await loadIndex(pcId);
-    for (const c of verified) delete index[c.item.id];
-    await saveIndex(pcId, index);
+/**
+ * Android ou iOS demandent eux-mêmes la confirmation, puis mettent à la corbeille (30 jours).
+ * Renvoie ce qui est vraiment parti : sur iPhone, une photo dont un fichier n'a pas été vérifié
+ * (ou une rafale incomplète) reste sur le téléphone, et doit rester connue comme « sur le PC ».
+ */
+export async function moveToTrash(pcId: string, verified: FreeCandidate[]): Promise<FreeCandidate[]> {
+  const removed = new Set(await Pg.removeFromPhone(verified.map((c) => c.item.uri), true));
+  const gone = verified.filter((c) => removed.has(c.item.uri));
+  await patchIndex(pcId, { del: gone.map((c) => c.item.id) });
+  return gone;
+}
+
+/**
+ * Le QR du PC préparé : on se connecte, on vérifie que c'est bien ce PC qui répond à l'adresse,
+ * on teste l'écriture. Renvoie le PC prêt à enregistrer (le mot de passe est celui du code).
+ */
+export async function pairFromCode(
+  p: Pairing,
+  opts: { id: string; encrypt: boolean; lang: Lang },
+): Promise<{ pc: PcSettings; encrypted: boolean; info: LoginInfo }> {
+  const info = await Pg.login({ host: p.host, share: '', user: p.user, password: p.password, encrypt: opts.encrypt, identity: '' });
+  if (p.name && info.identity && info.identity.toUpperCase() !== p.name.toUpperCase()) {
+    throw Object.assign(new Error(t.scanOtherPc(p.name, info.identity)), { code: 'QR_OTHER_PC' });
   }
-  return ok;
+  // Un PC qui ne sait pas chiffrer : on le dit (le réglage suit), jamais de repli caché.
+  const canEncrypt = !(info.dialect && !info.encrypted);
+  const identity = info.identity ?? p.name;
+  const pc: PcSettings = {
+    ...emptySettings,
+    id: opts.id,
+    host: p.host,
+    name: p.name || p.host,
+    share: p.share,
+    folder: joinPath(p.folder),
+    user: p.user,
+    encrypt: opts.encrypt && canEncrypt,
+    lang: opts.lang,
+    identity,
+  };
+  const connected = await Pg.connect({ host: pc.host, share: pc.share, user: pc.user, password: p.password, encrypt: pc.encrypt, identity });
+  await Pg.testWrite(pc.folder);
+  return { pc, encrypted: connected.encrypted, info };
 }
 
 export async function speedTest(pc: PcSettings, password: string, onBytes: (b: number) => void) {

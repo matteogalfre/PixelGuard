@@ -584,6 +584,16 @@ const char *smb2_get_client_guid(struct smb2_context *smb2);
 const char *smb2_get_server_guid(struct smb2_context *smb2);
 
 /*
+ * PixelGuard : le nom NetBIOS que le PC doit annoncer dans son défi NTLM (NULL ou "" : pas de
+ * contrôle). S'il en annonce un autre, la connexion s'arrête avant d'envoyer le message
+ * AUTHENTICATE (utilisateur et réponse au mot de passe), et smb2_pg_name_mismatch() vaut 1.
+ * smb2_pg_get_server_name() donne le nom annoncé ("" tant qu'aucun défi n'est arrivé).
+ */
+void smb2_pg_set_expected_server_name(struct smb2_context *smb2, const char *name);
+const char *smb2_pg_get_server_name(struct smb2_context *smb2);
+int smb2_pg_name_mismatch(struct smb2_context *smb2);
+
+/*
  * Copies the application key of the session to key: Session.ApplicationKey
  * of [MS-SMB2] 3.2.5.3.1, which DCE/RPC over a named pipe uses as its
  * session key, e.g. to encrypt the password buffers of SAMR.
@@ -885,6 +895,11 @@ void smb2_seekdir(struct smb2_context *smb2, struct smb2dir *smb2dir,
 struct smb2fh;
 /* Open a directory handle, including on hosts without O_DIRECTORY. */
 #define SMB2_O_DIRECTORY 0x10000000
+/*
+ * PixelGuard (2026-11-26, see PIXELGUARD-PATCHES.md): open with read-only sharing, so that a
+ * second writer gets STATUS_SHARING_VIOLATION instead of writing into the same file.
+ */
+#define SMB2_O_EXCLUSIVE_SHARE 0x20000000
 /*
  * Async open()
  *

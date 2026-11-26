@@ -4,9 +4,12 @@ import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useEffect, useRef, type ReactNode } from 'react';
+import type React from 'react';
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   Animated,
+  Appearance,
   Easing,
   Platform,
   Pressable,
@@ -23,7 +26,10 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, Path, Stop, LinearGradient as SvgGradient } from 'react-native-svg';
 
-export const C = {
+import { t as tr } from '../i18n';
+
+// Deux palettes aux mêmes noms : l'appli suit le thème clair ou sombre du téléphone.
+const DARK = {
   bg: '#07060F',
   bg2: '#0E0B1E',
   surface: 'rgba(255,255,255,0.045)',
@@ -31,7 +37,8 @@ export const C = {
   line: 'rgba(255,255,255,0.09)',
   text: '#F2F6FA',
   muted: '#8B98A8',
-  faint: '#566273',
+  /** Assez clair pour rester lisible (contraste 5:1 sur le fond), même en petit. */
+  faint: '#7A8798',
   /** Violet du logo, éclairci pour rester lisible sur fond nuit. */
   accent: '#9C8CFF',
   /** Violet profond, bas du dégradé. */
@@ -39,7 +46,59 @@ export const C = {
   ok: '#37D69A',
   warn: '#FFB547',
   danger: '#FF6B72',
+  /** Fond d'un choix sélectionné. */
+  selected: 'rgba(124,108,255,0.16)',
+  /** Creux : champs, code à copier, listes dans une carte. */
+  inset: 'rgba(0,0,0,0.32)',
+  glow1: 'rgba(124,108,255,0.22)',
+  glow2: 'rgba(176,108,255,0.07)',
+  okLine: 'rgba(55,214,154,0.35)',
+  warnLine: 'rgba(255,181,71,0.35)',
+  dangerLine: 'rgba(255,107,114,0.4)',
+  dangerBg: 'rgba(255,107,114,0.08)',
+  /** Barre posée en bas d'un écran, au-dessus du contenu. */
+  bar: 'rgba(7,6,15,0.94)',
+  thumb1: '#2A2160',
+  thumb2: '#16122E',
 };
+
+// Contrastes vérifiés : texte 17:1, secondaire 6:1, pâle 4,8:1, violet 5,7:1 sur le fond.
+const LIGHT: typeof DARK = {
+  bg: '#F6F5FB',
+  bg2: '#ECEAF7',
+  surface: '#FFFFFF',
+  surfaceHi: 'rgba(40,30,110,0.07)',
+  line: 'rgba(30,24,80,0.12)',
+  text: '#15122B',
+  muted: '#555C6B',
+  faint: '#666D7C',
+  accent: '#5B47E0',
+  accent2: '#6A55F5',
+  ok: '#0A7A4F',
+  warn: '#A65F00',
+  danger: '#C8303A',
+  selected: 'rgba(91,71,224,0.12)',
+  inset: 'rgba(30,24,80,0.05)',
+  glow1: 'rgba(124,108,255,0.16)',
+  glow2: 'rgba(176,108,255,0.05)',
+  okLine: 'rgba(10,122,79,0.35)',
+  warnLine: 'rgba(166,95,0,0.35)',
+  dangerLine: 'rgba(200,48,58,0.35)',
+  dangerBg: 'rgba(200,48,58,0.06)',
+  bar: 'rgba(246,245,251,0.95)',
+  thumb1: '#DCD7FA',
+  thumb2: '#ECEAF7',
+};
+
+export type Theme = 'light' | 'dark';
+let theme: Theme = Appearance.getColorScheme() === 'light' ? 'light' : 'dark';
+
+/** Les couleurs du thème en cours. L'objet reste le même, ses valeurs changent avec le thème. */
+export const C = { ...(theme === 'light' ? LIGHT : DARK) };
+
+export function currentTheme(): Theme {
+  return theme;
+}
 
 export const F = {
   regular: 'Inter_400Regular',
@@ -50,6 +109,14 @@ export const F = {
 };
 
 export const GRADIENT = ['#8F7DFF', '#6A55F5'] as const;
+
+/**
+ * Une icône décorative : le lecteur d'écran la saute (le texte ou le nom du bouton à côté dit
+ * déjà tout ; sans ça, il s'arrête sur un caractère vide de la police d'icônes).
+ */
+export function Icon(props: React.ComponentProps<typeof MaterialCommunityIcons>) {
+  return <MaterialCommunityIcons accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants" {...props} />;
+}
 
 export function tap() {
   if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
@@ -65,7 +132,7 @@ export function Screen({ children, scroll = true }: { children: ReactNode; scrol
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
       <LinearGradient
-        colors={['rgba(124,108,255,0.22)', 'rgba(176,108,255,0.07)', 'transparent']}
+        colors={[C.glow1, C.glow2, 'transparent']}
         start={{ x: 0.1, y: 0 }}
         end={{ x: 0.9, y: 0.55 }}
         style={StyleSheet.absoluteFill}
@@ -90,30 +157,32 @@ export function Header({ title, subtitle, back = true, right }: { title: string;
     <View style={{ gap: 4, marginBottom: 4 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 44 }}>
         {back ? (
-          <IconButton icon="arrow-left" onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))} />
+          <IconButton icon="arrow-left" label={tr.back} onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))} />
         ) : (
           <View />
         )}
         {right}
       </View>
-      <Text style={t.h1}>{title}</Text>
+      <Text style={t.h1} accessibilityRole="header" maxFontSizeMultiplier={1.6}>{title}</Text>
       {subtitle ? <Text style={t.sub}>{subtitle}</Text> : null}
     </View>
   );
 }
 
-export function IconButton({ icon, onPress, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; onPress: () => void; label?: string }) {
+/** Bouton rond à icône : `label` est ce que lit le lecteur d'écran. */
+export function IconButton({ icon, onPress, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; onPress: () => void; label: string }) {
   return (
     <Pressable
       onPress={() => {
         tap();
         onPress();
       }}
-      accessibilityLabel={label ?? icon}
+      accessibilityRole="button"
+      accessibilityLabel={label}
       hitSlop={8}
       style={({ pressed }) => [s.iconButton, pressed && { backgroundColor: C.surfaceHi }]}
     >
-      <MaterialCommunityIcons name={icon} size={22} color={C.text} />
+      <Icon name={icon} size={22} color={C.text} />
     </Pressable>
   );
 }
@@ -122,6 +191,7 @@ export function Card({ children, style, onPress }: { children: ReactNode; style?
   if (!onPress) return <View style={[s.card, style]}>{children}</View>;
   return (
     <Pressable
+      accessibilityRole="button"
       onPress={() => {
         tap();
         onPress();
@@ -156,7 +226,7 @@ export function MainButton({
         <ActivityIndicator color={fg} />
       ) : (
         <>
-          {icon ? <MaterialCommunityIcons name={icon} size={20} color={fg} /> : null}
+          {icon ? <Icon name={icon} size={20} color={fg} /> : null}
           <Text style={[s.buttonText, { color: fg }]}>{label}</Text>
         </>
       )}
@@ -165,6 +235,9 @@ export function MainButton({
   return (
     <Pressable
       disabled={disabled || busy}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ disabled: !!disabled || !!busy, busy: !!busy }}
       onPress={() => {
         tap();
         onPress();
@@ -182,8 +255,55 @@ export function MainButton({
   );
 }
 
+/**
+ * Fin de sauvegarde réussie : une coche qui apparaît en rebondissant. Immobile si le téléphone
+ * demande de réduire les animations ; le lecteur d'écran lit le titre et le détail.
+ */
+export function DoneCheck({ title, detail }: { title: string; detail: string }) {
+  const scale = useRef(new Animated.Value(0.4)).current;
+  const fade = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    let live = true;
+    const native = Platform.OS !== 'web';
+    AccessibilityInfo.isReduceMotionEnabled()
+      .catch(() => true)
+      .then((reduce) => {
+        if (!live) return;
+        if (reduce) {
+          scale.setValue(1);
+          fade.setValue(1);
+          return;
+        }
+        Animated.parallel([
+          Animated.spring(scale, { toValue: 1, friction: 5, tension: 140, useNativeDriver: native }),
+          Animated.timing(fade, { toValue: 1, duration: 220, useNativeDriver: native }),
+        ]).start();
+      });
+    return () => {
+      live = false;
+    };
+  }, [scale, fade]);
+  return (
+    <View
+      accessible
+      accessibilityLabel={`${title}. ${detail}`}
+      accessibilityLiveRegion="polite"
+      style={[s.card, { alignItems: 'center', gap: 8, paddingVertical: 22, borderColor: C.okLine }]}
+    >
+      <Animated.View style={{ opacity: fade, transform: [{ scale }] }}>
+        <LinearGradient colors={GRADIENT} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center' }}>
+          <Icon name="check-bold" size={40} color="#FFFFFF" />
+        </LinearGradient>
+      </Animated.View>
+      <Text style={[t.h2, { color: C.text, textAlign: 'center' }]}>{title}</Text>
+      <Text style={[t.small, { textAlign: 'center' }]}>{detail}</Text>
+    </View>
+  );
+}
+
 /** Anneau de progression animé, dégradé cyan vers violet. */
-export function Ring({ value, size = 200, stroke = 14, children }: { value: number; size?: number; stroke?: number; children?: ReactNode }) {
+/** `label` : ce que lit le lecteur d'écran (sinon il ne voit qu'un dessin). */
+export function Ring({ value, size = 200, stroke = 14, label, children }: { value: number; size?: number; stroke?: number; label?: string; children?: ReactNode }) {
   const anim = useRef(new Animated.Value(0)).current;
   const r = (size - stroke) / 2;
   const circ = 2 * Math.PI * r;
@@ -200,7 +320,13 @@ export function Ring({ value, size = 200, stroke = 14, children }: { value: numb
   const web = Platform.OS === 'web';
   const offset = anim.interpolate({ inputRange: [0, 1], outputRange: [circ, 0] });
   return (
-    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+    <View
+      accessible={!!label}
+      accessibilityRole={label ? 'progressbar' : undefined}
+      accessibilityLabel={label}
+      accessibilityValue={label ? { min: 0, max: 100, now: Math.round(clamped * 100) } : undefined}
+      style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}
+    >
       <Svg width={size} height={size} style={StyleSheet.absoluteFill}>
         <Defs>
           <SvgGradient id="ring" x1="0" y1="0" x2="1" y2="1">
@@ -268,15 +394,16 @@ export function Sparkline({ values, width, height = 44 }: { values: number[]; wi
 
 /** Vignette d'une photo du téléphone (ou un dégradé dans l'aperçu web). */
 export function Thumb({ uri, size, radius = 12, style }: { uri?: string; size: number | `${number}%`; radius?: number; style?: StyleProp<ViewStyle> }) {
+  const hidden = { accessible: false, accessibilityElementsHidden: true, importantForAccessibility: 'no-hide-descendants' as const };
   const box = { width: size, height: size, borderRadius: radius, overflow: 'hidden' as const };
   if (!uri) {
     return (
-      <LinearGradient colors={['#2A2160', '#16122E']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={[box, { alignItems: 'center', justifyContent: 'center' }, style]}>
-        <MaterialCommunityIcons name="image-outline" size={typeof size === 'number' ? size * 0.38 : 28} color="rgba(255,255,255,0.35)" />
+      <LinearGradient {...hidden} colors={[C.thumb1, C.thumb2]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={[box, { alignItems: 'center', justifyContent: 'center' }, style]}>
+        <Icon name="image-outline" size={typeof size === 'number' ? size * 0.38 : 28} color={C.faint} />
       </LinearGradient>
     );
   }
-  return <Image source={{ uri }} style={[box, style as object]} contentFit="cover" transition={150} recyclingKey={uri} />;
+  return <Image {...hidden} source={{ uri }} style={[box, style as object]} contentFit="cover" transition={150} recyclingKey={uri} />;
 }
 
 export function Bar({ value, height = 6 }: { value: number; height?: number }) {
@@ -290,12 +417,15 @@ export function Bar({ value, height = 6 }: { value: number; height?: number }) {
 
 export function Segmented<T extends string | number>({ options, value, onChange }: { options: { value: T; label: string }[]; value: T; onChange: (v: T) => void }) {
   return (
-    <View style={s.segmented}>
+    <View style={s.segmented} accessibilityRole="radiogroup">
       {options.map((o) => {
         const on = o.value === value;
         return (
           <Pressable
             key={String(o.value)}
+            accessibilityRole="radio"
+            accessibilityLabel={o.label}
+            accessibilityState={{ selected: on, checked: on }}
             onPress={() => {
               tap();
               onChange(o.value);
@@ -339,7 +469,7 @@ export function Step({ n, title, done, active, children }: { n: number; title: s
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
         {done ? (
           <LinearGradient colors={GRADIENT} style={s.stepBadge}>
-            <MaterialCommunityIcons name="check" size={16} color="#FFFFFF" />
+            <Icon name="check" size={16} color="#FFFFFF" />
           </LinearGradient>
         ) : (
           <View style={[s.stepBadge, { borderWidth: 1.5, borderColor: active ? C.accent : C.line }]}>
@@ -353,32 +483,54 @@ export function Step({ n, title, done, active, children }: { n: number; title: s
   );
 }
 
-export const t = StyleSheet.create({
-  h1: { color: C.text, fontSize: 32, fontFamily: F.black, letterSpacing: -0.8 },
-  h2: { color: C.text, fontSize: 22, fontFamily: F.bold, letterSpacing: -0.4 },
-  h3: { color: C.text, fontSize: 17, fontFamily: F.semi },
-  body: { color: C.text, fontSize: 15, fontFamily: F.regular, lineHeight: 21 },
-  sub: { color: C.muted, fontSize: 15, fontFamily: F.regular, lineHeight: 21 },
-  small: { color: C.muted, fontSize: 13, fontFamily: F.medium },
-  label: { color: C.muted, fontSize: 12, fontFamily: F.semi, letterSpacing: 0.6, textTransform: 'uppercase' },
-  hint: { color: C.faint, fontSize: 12.5, fontFamily: F.regular, lineHeight: 17 },
-  mono: { color: C.muted, fontSize: 12, fontFamily: Platform.OS === 'android' ? 'monospace' : 'Menlo' },
-  big: { color: C.text, fontSize: 44, fontFamily: F.black, letterSpacing: -1.5 } as TextStyle,
-});
+/** Garde les noms des styles et vérifie chaque style (comme StyleSheet.create, sans le figer). */
+const styles = <T extends Record<string, TextStyle>>(o: T): T => o;
 
-export const s = StyleSheet.create({
-  card: { backgroundColor: C.surface, borderRadius: 22, padding: 18, gap: 10, borderWidth: 1, borderColor: C.line },
-  button: { borderRadius: 18, height: 58, justifyContent: 'center', paddingHorizontal: 20 },
-  buttonInner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
-  buttonText: { fontSize: 17, fontFamily: F.bold, letterSpacing: -0.2 },
-  ghost: { backgroundColor: C.surface, borderWidth: 1, borderColor: C.line },
-  iconButton: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: C.surface, borderWidth: 1, borderColor: C.line },
-  segmented: { flexDirection: 'row', backgroundColor: 'rgba(0,0,0,0.3)', borderRadius: 14, padding: 4, gap: 4 },
-  // Chaque bouton prend la largeur de son texte (le reste est partagé) : « Mois dernier » tient sur une ligne.
-  segment: { flexGrow: 1, flexShrink: 1, flexBasis: 'auto', alignItems: 'center', justifyContent: 'center', paddingVertical: 9, paddingHorizontal: 8, borderRadius: 10, borderWidth: 1, borderColor: 'transparent' },
-  input: {
-    backgroundColor: 'rgba(0,0,0,0.35)', color: C.text, borderRadius: 14, borderWidth: 1, borderColor: C.line,
-    paddingHorizontal: 14, height: 50, fontSize: 16, fontFamily: F.medium,
-  },
-  stepBadge: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
-});
+function makeText(C: typeof DARK) {
+  return styles({
+    h1: { color: C.text, fontSize: 32, fontFamily: F.black, letterSpacing: -0.8 },
+    h2: { color: C.text, fontSize: 22, fontFamily: F.bold, letterSpacing: -0.4 },
+    h3: { color: C.text, fontSize: 17, fontFamily: F.semi },
+    body: { color: C.text, fontSize: 15, fontFamily: F.regular, lineHeight: 21 },
+    sub: { color: C.muted, fontSize: 15, fontFamily: F.regular, lineHeight: 21 },
+    small: { color: C.muted, fontSize: 14, fontFamily: F.medium },
+    label: { color: C.muted, fontSize: 12.5, fontFamily: F.semi, letterSpacing: 0.6, textTransform: 'uppercase' },
+    hint: { color: C.faint, fontSize: 13.5, fontFamily: F.regular, lineHeight: 19 },
+    mono: { color: C.muted, fontSize: 12, fontFamily: Platform.OS === 'android' ? 'monospace' : 'Menlo' },
+    big: { color: C.text, fontSize: 44, fontFamily: F.black, letterSpacing: -1.5 },
+  });
+}
+
+function makeBox(C: typeof DARK) {
+  return styles({
+    card: { backgroundColor: C.surface, borderRadius: 22, padding: 18, gap: 10, borderWidth: 1, borderColor: C.line },
+    // Hauteur minimale, pas fixe : avec une grande taille de texte, le bouton grandit au lieu de couper.
+    button: { borderRadius: 18, minHeight: 58, paddingVertical: 12, justifyContent: 'center', paddingHorizontal: 20 },
+    buttonInner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, flexWrap: 'wrap' },
+    buttonText: { fontSize: 17, fontFamily: F.bold, letterSpacing: -0.2 },
+    ghost: { backgroundColor: C.surface, borderWidth: 1, borderColor: C.line },
+    iconButton: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: C.surface, borderWidth: 1, borderColor: C.line },
+    segmented: { flexDirection: 'row', backgroundColor: C.inset, borderRadius: 14, padding: 4, gap: 4 },
+    // Chaque bouton prend la largeur de son texte (le reste est partagé) : « Mois dernier » tient sur une ligne.
+    segment: { flexGrow: 1, flexShrink: 1, flexBasis: 'auto', alignItems: 'center', justifyContent: 'center', minHeight: 44, paddingVertical: 9, paddingHorizontal: 8, borderRadius: 10, borderWidth: 1, borderColor: 'transparent' },
+    input: {
+      backgroundColor: C.inset, color: C.text, borderRadius: 14, borderWidth: 1, borderColor: C.line,
+      paddingHorizontal: 14, minHeight: 50, paddingVertical: 12, fontSize: 16, fontFamily: F.medium,
+    },
+    stepBadge: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  });
+}
+
+/** Les styles de texte et de boîtes du thème en cours (mêmes objets, valeurs recalculées). */
+export const t = makeText(C);
+export const s = makeBox(C);
+
+/** Passe au thème clair ou sombre. L'appelant fait ensuite redessiner les écrans. */
+export function applyTheme(next: Theme): void {
+  if (next === theme) return;
+  theme = next;
+  Object.assign(C, next === 'light' ? LIGHT : DARK);
+  Object.assign(t, makeText(C));
+  Object.assign(s, makeBox(C));
+}
+

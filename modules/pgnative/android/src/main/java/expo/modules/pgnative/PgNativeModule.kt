@@ -11,7 +11,10 @@ import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.provider.MediaStore
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import com.hierynomus.msdtyp.AccessMask
+import com.hierynomus.mserref.NtStatus
 import com.hierynomus.msfscc.FileAttributes
 import com.hierynomus.mssmb2.SMB2CreateDisposition
 import com.hierynomus.mssmb2.SMB2ShareAccess
@@ -59,6 +62,16 @@ class SmbSettings : Record {
   @Field var user: String = ""
   @Field var password: String = ""
   @Field var encrypt: Boolean = true
+  /** Nom NetBIOS du PC appairé ("" : pas encore connu). */
+  @Field var identity: String = ""
+}
+
+/** Une page donnée par le petit serveur web (le fichier de préparation, et sa page). */
+class ServedPage : Record {
+  @Field var path: String = "/"
+  @Field var type: String = "text/plain"
+  @Field var body: String = ""
+  @Field var download: String = ""
 }
 
 private class PgError(code: String, message: String) : CodedException(code, message, null)
@@ -76,6 +89,10 @@ class PgNativeModule : Module() {
   private var maxWrite = SmbCore.CHUNK
   private var maxRead = SmbCore.CHUNK
   private var pendingRemoval: Promise? = null
+  private var pendingUris: List<String> = emptyList()
+  private var pendingScan: Promise? = null
+  private var http: MiniServer? = null
+  private val textLock = Any()
   private var wifiLock: WifiManager.WifiLock? = null
 
   private val context: Context
@@ -88,9 +105,9 @@ class PgNativeModule : Module() {
     Events("onProgress", "onStopRequested")
 
     OnCreate {
-      TransferService.onStopRequested = {
+      TransferService.onStopRequested = { reason ->
         cancelled.set(true)
-        sendEvent("onStopRequested", mapOf<String, Any?>())
+        sendEvent("onStopRequested", mapOf<String, Any?>("reason" to reason))
       }
     }
 
@@ -102,6 +119,10 @@ class PgNativeModule : Module() {
 
     AsyncFunction("listMedia") Coroutine { bucketIds: List<String> ->
       withContext(Dispatchers.IO) { listMedia(bucketIds) }
+    }
+
+    AsyncFunction("galleryVersion") Coroutine { ->
+      withContext(Dispatchers.IO) { galleryVersion() }
     }
 
     // ---------- Trouver le PC
@@ -124,7 +145,7 @@ class PgNativeModule : Module() {
     // ---------- Dossier partagé
 
     AsyncFunction("login") Coroutine { s: SmbSettings ->
-      withContext(Dispatchers.IO) { guard { synchronized(smbLock) { login(s) } } }
+      withContext(Dispatchers.IO) { guard { synchronized(smbLock) { login(s, strict = false) } } }
     }
 
     AsyncFunction("connect") Coroutine { s: SmbSettings ->
@@ -217,19 +238,60 @@ class PgNativeModule : Module() {
       } else {
         MediaStore.createDeleteRequest(context.contentResolver, list)
       }
-      pendingRemoval?.resolve(false)
+      pendingRemoval?.resolve(emptyList<String>())
       pendingRemoval = promise
+      pendingUris = uris
       activity.startIntentSenderForResult(request.intentSender, REMOVE_REQUEST, null, 0, 0, 0)
     }.runOnQueue(Queues.MAIN)
 
+    // Le QR affiché par le PC préparé : le texte lu, ou null si on a annulé.
+    AsyncFunction("scanQr") { prompt: String, promise: Promise ->
+      val activity = appContext.currentActivity ?: throw PgError("NO_ACTIVITY", "Appli pas au premier plan")
+      pendingScan?.resolve(null)
+      pendingScan = promise
+      val options = ScanOptions()
+        .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+        .setPrompt(prompt)
+        .setBeepEnabled(false)
+        .setOrientationLocked(false)
+      activity.startActivityForResult(ScanContract().createIntent(activity, options), SCAN_REQUEST)
+    }.runOnQueue(Queues.MAIN)
+
     OnActivityResult { _, payload ->
+      if (payload.requestCode == SCAN_REQUEST) {
+        pendingScan?.resolve(ScanContract().parseResult(payload.resultCode, payload.data).contents)
+        pendingScan = null
+      }
       if (payload.requestCode == REMOVE_REQUEST) {
-        pendingRemoval?.resolve(payload.resultCode == Activity.RESULT_OK)
+        // Android supprime tout ou rien : on renvoie ce qui est vraiment parti.
+        pendingRemoval?.resolve(if (payload.resultCode == Activity.RESULT_OK) pendingUris else emptyList())
         pendingRemoval = null
+        pendingUris = emptyList()
+      }
+    }
+
+    // Le téléphone donne « Prepare my PC » au navigateur du PC, le temps de la préparation.
+    AsyncFunction("startPrepServer") Coroutine { pages: List<ServedPage> ->
+      withContext(Dispatchers.IO) {
+        http?.stop()
+        val map = HashMap<String, MiniServer.Page>()
+        for (p in pages) map[p.path] = MiniServer.Page(p.type, p.body.toByteArray(Charsets.UTF_8), p.download)
+        val server = MiniServer(8800, map)
+        http = server
+        mapOf("ip" to MiniServer.localIpv4(), "port" to server.port())
+      }
+    }
+
+    AsyncFunction("stopPrepServer") Coroutine { ->
+      withContext(Dispatchers.IO) {
+        http?.stop()
+        http = null
+        true
       }
     }
 
     OnDestroy {
+      http?.stop()
       holdWifi(false)
       TransferService.onStopRequested = null
       synchronized(smbLock) { closeAll() }
@@ -239,12 +301,20 @@ class PgNativeModule : Module() {
 
     AsyncFunction("saveText") Coroutine { name: String, text: String ->
       withContext(Dispatchers.IO) {
-        val target = privateFile(name)
-        val tmp = File(target.parentFile, target.name + ".tmp")
-        tmp.writeText(text)
-        if (!tmp.renameTo(target)) {
-          target.delete()
-          tmp.renameTo(target)
+        // Une écriture à la fois, chacune dans son propre fichier temporaire, puis remplacement
+        // d'un coup : deux enregistrements simultanés ne peuvent plus se mélanger.
+        synchronized(textLock) {
+          val target = privateFile(name)
+          val tmp = File.createTempFile(target.name, ".tmp", target.parentFile)
+          try {
+            tmp.writeText(text)
+            if (!tmp.renameTo(target)) {
+              target.delete()
+              if (!tmp.renameTo(target)) throw PgError("SAVE", "Impossible d'enregistrer $name")
+            }
+          } finally {
+            if (tmp.exists()) tmp.delete()
+          }
         }
         true
       }
@@ -263,14 +333,22 @@ class PgNativeModule : Module() {
   private inline fun <T> guard(block: () -> T): T {
     try {
       return block()
+    } catch (e: SMBApiException) {
+      // Session fermée par le PC (15 min sans rien, redémarrage du service) : c'est une coupure,
+      // le prochain appel rouvre une connexion.
+      if (sessionGone(e)) {
+        dropConnection()
+        throw PgError("CONNECTION", "Connexion au PC perdue")
+      }
+      throw PgError("SMB", "Le PC refuse : ${e.status}")
     } catch (e: CodedException) {
       throw e
     } catch (e: SmbCore.Exists) {
       throw PgError("EXISTS", e.message ?: "Existe déjà")
     } catch (e: SmbCore.Cancelled) {
       throw PgError("CANCELLED", "Arrêté")
-    } catch (e: SMBApiException) {
-      throw PgError("SMB", "Le PC refuse : ${e.status}")
+    } catch (e: SmbCore.Busy) {
+      throw PgError("BUSY", e.message ?: "Fichier occupé")
     } catch (e: SMBRuntimeException) {
       dropConnection()
       throw PgError("CONNECTION", "Connexion au PC perdue")
@@ -282,11 +360,23 @@ class PgNativeModule : Module() {
       throw PgError("CONNECTION", "Connexion au PC perdue")
     } catch (e: IOException) {
       throw PgError("TRANSFER", e.message ?: "Erreur de transfert")
+    } finally {
+      used.remove()
     }
   }
 
+  private fun sessionGone(e: SMBApiException): Boolean =
+    e.status == NtStatus.STATUS_USER_SESSION_DELETED ||
+      e.status == NtStatus.STATUS_NETWORK_SESSION_EXPIRED ||
+      e.status == NtStatus.STATUS_NETWORK_NAME_DELETED
+
+  // La connexion qu'utilise l'appel en cours sur ce fil. Quand il échoue, on ne ferme qu'elle :
+  // jamais une connexion plus récente qu'un autre envoi vient de rouvrir.
+  private val used = ThreadLocal<Connection?>()
+
   private fun dropConnection() {
-    synchronized(smbLock) { closeAll() }
+    val failed = used.get()
+    synchronized(smbLock) { if (failed == null || failed === connection) closeAll() }
   }
 
   // ===================== Galerie
@@ -343,6 +433,23 @@ class PgNativeModule : Module() {
       }
     }
     return out
+  }
+
+  // Change dès qu'une photo arrive, part ou change (compteur de MediaStore, par volume), ou que
+  // l'accès aux photos change : tant qu'il ne bouge pas, le JS garde sa copie de la galerie.
+  private fun galleryVersion(): String = try {
+    val ctx = context
+    val volumes = MediaStore.getExternalVolumeNames(ctx).sorted()
+      .joinToString(",") { "$it=${MediaStore.getGeneration(ctx, it)}" }
+    val access = listOf(
+      android.Manifest.permission.READ_MEDIA_IMAGES,
+      android.Manifest.permission.READ_MEDIA_VIDEO,
+      "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+      android.Manifest.permission.READ_EXTERNAL_STORAGE,
+    ).joinToString("") { if (ctx.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED) "1" else "0" }
+    "${MediaStore.getVersion(ctx)}|$volumes|$access"
+  } catch (e: Exception) {
+    "" // inconnue : le JS relit la galerie à chaque fois
   }
 
   private val mediaSelection =
@@ -494,9 +601,25 @@ class PgNativeModule : Module() {
     return b.size == 16 && (b[0].toInt() and 0xfe) == 0xfc
   }
 
-  private fun login(s: SmbSettings): Map<String, Any?> {
+  // Le nom annoncé par le PC de la dernière connexion, et son adresse : il fait foi tant que
+  // l'appli n'a pas encore enregistré le nom de ce PC.
+  private var seenName: String? = null
+  private var seenHost: String? = null
+
+  /**
+   * `strict` (tout sauf l'appairage) : le PC doit annoncer le nom retenu à l'appairage avant de
+   * recevoir l'utilisateur et la réponse au mot de passe. Le chiffrement est contrôlé par connect().
+   */
+  private fun login(s: SmbSettings, strict: Boolean): Map<String, Any?> {
     closeAll()
-    val c = SMBClient(SmbCore.config(s.encrypt))
+    val expected = when {
+      !strict -> ""
+      s.identity.isNotBlank() -> s.identity
+      seenHost == s.host -> seenName ?: ""
+      else -> ""
+    }
+    val pin = SmbCore.Pin(expected)
+    val c = SMBClient(SmbCore.config(s.encrypt, pin))
     val (host, port) = cleanHost(s.host)
     val address = try {
       localAddress(host)
@@ -523,8 +646,16 @@ class PgNativeModule : Module() {
     } catch (e: Exception) {
       try { conn.close(true) } catch (_: Exception) {}
       c.close()
+      if (pin.mismatch) {
+        throw PgError(
+          "PC_CHANGED",
+          "Ce n'est pas le PC appairé (il s'annonce comme « ${pin.seen} ») : ni ton mot de passe ni tes photos ne sont partis. Si tu as renommé ton PC, refais l'appairage."
+        )
+      }
       throw PgError("AUTH", "Utilisateur ou mot de passe refusé par le PC")
     }
+    seenName = pin.seen
+    seenHost = s.host
     client = c
     connection = conn
     session = sess
@@ -542,6 +673,7 @@ class PgNativeModule : Module() {
       "signed" to sess.isSigningRequired,
       "encrypted" to encrypted(sess),
       "shares" to shares,
+      "identity" to pin.seen?.ifEmpty { null },
     )
   }
 
@@ -551,14 +683,58 @@ class PgNativeModule : Module() {
     false
   }
 
+  private fun notEncrypted(): Nothing {
+    closeAll()
+      throw PgError(
+        "NOT_ENCRYPTED",
+        "Ce PC n'a pas accepté le chiffrement : rien n'a été envoyé. Chez toi, tu peux couper le chiffrement dans les réglages de ce PC."
+      )
+  }
+
+  private fun shareName(s: SmbSettings) = s.share.trim().trim('\\', '/')
+
+  // smbj ne voit pas qu'un PC a fermé la connexion (15 min sans rien sous Windows) : un aller-retour
+  // le dit, et il échoue tout de suite dans ce cas. Une réponse, même un refus, prouve qu'elle vit.
+  private fun answers(sh: DiskShare): Boolean = try {
+    sh.folderExists("")
+    true
+  } catch (e: SMBApiException) {
+    !sessionGone(e)
+  } catch (e: Exception) {
+    false
+  }
+
   private fun connect(s: SmbSettings): Map<String, Any?> {
     val sameLogin = settings?.let { it.host == s.host && it.user == s.user && it.password == s.password && it.encrypt == s.encrypt } == true
-    val info = if (sameLogin && connection?.isConnected == true && session != null) null else login(s)
+    val current = share
+    val sameIdentity = s.identity.isBlank() || s.identity.equals(seenName, ignoreCase = true)
+    if (sameLogin && sameIdentity && connection?.isConnected == true && session != null && current != null && current.isConnected &&
+      settings?.let { shareName(it) } == shareName(s)
+    ) {
+      if (answers(current)) {
+        if (s.encrypt && !encrypted(session)) notEncrypted()
+        // Déjà connecté à ce partage : on le garde. Le fermer ferait tomber les envois en cours
+        // (une comparaison lancée pendant une sauvegarde, par exemple).
+        val proto = connection!!.connectionContext.negotiatedProtocol
+        return mapOf(
+          "dialect" to proto.dialect.name,
+          "signed" to session!!.isSigningRequired,
+          "encrypted" to encrypted(session),
+          "shares" to null,
+          "identity" to seenName?.ifEmpty { null },
+        )
+      }
+      closeAll() // fermée par le PC entre-temps : on en refait une
+    }
+    val alive = sameLogin && sameIdentity && connection?.isConnected == true && session != null
+    if (!alive) login(s, strict = true)
     try { share?.close() } catch (_: Exception) {}
     share = null
     val sess = session ?: throw PgError("NOT_CONNECTED", "Pas connecté au PC")
+    // smbj continue seulement signé si le PC ne chiffre pas : jamais de repli silencieux.
+    if (s.encrypt && !encrypted(sess)) notEncrypted()
     val sh = try {
-      sess.connectShare(s.share.trim().trim('\\', '/')) as? DiskShare
+      sess.connectShare(shareName(s)) as? DiskShare
         ?: throw PgError("NOT_DISK", "« ${s.share} » n'est pas un dossier partagé")
     } catch (e: SMBApiException) {
       throw PgError("SHARE", "Partage « ${s.share} » introuvable ou refusé")
@@ -570,17 +746,22 @@ class PgNativeModule : Module() {
       "dialect" to proto.dialect.name,
       "signed" to sess.isSigningRequired,
       "encrypted" to encrypted(sess),
-      "shares" to (info?.get("shares")),
+      "shares" to null,
+      "identity" to seenName?.ifEmpty { null },
     )
   }
 
   // Rouvre la connexion si le Wi-Fi a coupé entre deux envois.
   private fun ensureShare(): DiskShare = synchronized(smbLock) {
     val sh = share
-    if (sh != null && connection?.isConnected == true && sh.isConnected) return sh
+    if (sh != null && connection?.isConnected == true && sh.isConnected) {
+      used.set(connection)
+      return sh
+    }
     val s = settings ?: throw PgError("NOT_CONNECTED", "Pas connecté au PC")
     closeAll()
     connect(s)
+    used.set(connection)
     share ?: throw PgError("NOT_CONNECTED", "Pas connecté au PC")
   }
 
@@ -687,7 +868,8 @@ class PgNativeModule : Module() {
     } catch (e: com.hierynomus.protocol.transport.TransportException) {
       throw e
     } catch (e: com.hierynomus.smbj.common.SMBRuntimeException) {
-      if (e is SMBApiException) done = true // refus du PC : pas de reprise à garder
+      // Refus du PC : pas de reprise à garder. Session expirée : si, c'est une coupure.
+      if (e is SMBApiException && !sessionGone(e)) done = true
       throw e
     } catch (e: Exception) {
       done = true
@@ -768,5 +950,6 @@ class PgNativeModule : Module() {
 
   companion object {
     private const val REMOVE_REQUEST = 47_211
+    private const val SCAN_REQUEST = 47_212
   }
 }

@@ -2,15 +2,16 @@
   "expo": {
     "name": "PixelGuard",
     "slug": "pixelguard-mobile",
-    "version": "0.2.1",
+    "version": "0.3.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "dark",
+    "userInterfaceStyle": "automatic",
     "ios": {
       "bundleIdentifier": "com.matteogalfre.pixelguard",
       "supportsTablet": false,
       "infoPlist": {
         "NSLocalNetworkUsageDescription": "PixelGuard cherche ton PC sur le Wi-Fi de la maison et y copie tes photos. Rien ne sort de ton réseau.",
+        "NSCameraUsageDescription": "PixelGuard lit le code affiché par ton PC pour s'y connecter. Aucune photo n'est prise.",
         "ITSAppUsesNonExemptEncryption": false
       }
     },
@@ -63,7 +64,12 @@
         "expo-build-properties",
         {
           "android": {
-            "minSdkVersion": 30
+            "minSdkVersion": 30,
+            "buildArchs": ["arm64-v8a"],
+            "enableMinifyInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true,
+            "useLegacyPackaging": true,
+            "extraProguardRules": "-keep class com.hierynomus.** { *; }\n-keep class net.engio.mbassy.** { *; }\n-keep class expo.modules.pgnative.** { *; }\n-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod\n-dontwarn org.slf4j.**\n-dontwarn org.bouncycastle.**\n-dontwarn net.engio.mbassy.**\n-dontwarn javax.el.**\n-dontwarn org.ietf.jgss.**\n-dontwarn javax.security.auth.kerberos.**\n-dontwarn com.hierynomus.**"
           }
         }
       ],

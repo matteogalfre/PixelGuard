@@ -1,4 +1,3 @@
-import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
@@ -6,7 +5,7 @@ import { Pressable, ScrollView, Text, View } from 'react-native';
 import { lang, periodLabel, shortMonth, t } from '../i18n';
 import { humanBytes, periodRange, ym, type Period } from '../logic';
 import { useApp } from '../state';
-import { C, Card, F, Header, MainButton, Screen, t as ty, tap } from '../ui/kit';
+import { Icon, C, Card, F, Header, MainButton, Screen, t as ty, tap } from '../ui/kit';
 
 const same = (a: Period, b: Period) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -46,12 +45,14 @@ export default function PeriodScreen() {
       <Pressable
         key={label}
         onPress={() => pick(p)}
+        accessibilityRole="radio"
+        accessibilityState={{ selected: on, checked: on }}
         style={({ pressed }) => ({
           flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 14,
-          backgroundColor: on ? 'rgba(124,108,255,0.14)' : pressed ? C.surfaceHi : 'transparent',
+          backgroundColor: on ? C.selected : pressed ? C.surfaceHi : 'transparent',
         })}
       >
-        <MaterialCommunityIcons name={on ? 'radiobox-marked' : 'radiobox-blank'} size={20} color={on ? C.accent : C.faint} />
+        <Icon name={on ? 'radiobox-marked' : 'radiobox-blank'} size={20} color={on ? C.accent : C.faint} />
         <Text style={[ty.body, on && { color: C.accent, fontFamily: F.semi }]}>{label}</Text>
       </Pressable>
     );
@@ -61,9 +62,12 @@ export default function PeriodScreen() {
     <Pressable
       key={label}
       onPress={onPress}
+      accessibilityRole="radio"
+      accessibilityState={{ selected: on, checked: on }}
       style={{
+        minHeight: 44, justifyContent: 'center',
         paddingHorizontal: 14, paddingVertical: 9, borderRadius: 16, borderWidth: 1,
-        borderColor: on ? C.accent : C.line, backgroundColor: on ? 'rgba(124,108,255,0.14)' : C.surface,
+        borderColor: on ? C.accent : C.line, backgroundColor: on ? C.selected : C.surface,
       }}
     >
       <Text style={{ color: on ? C.accent : C.text, fontFamily: F.semi }}>{label}</Text>

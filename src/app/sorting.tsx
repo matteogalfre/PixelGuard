@@ -4,7 +4,7 @@ import { Pressable, Switch, Text, View } from 'react-native';
 import { lang, t } from '../i18n';
 import { folderFor, joinPath, LAYOUTS, type Layout, type Sortable } from '../logic';
 import { useApp } from '../state';
-import { C, Card, F, Header, Screen, t as ty, tap } from '../ui/kit';
+import { Icon, C, Card, F, Header, Screen, t as ty, tap } from '../ui/kit';
 
 const ICONS: Record<Layout, keyof typeof MaterialCommunityIcons.glyphMap> = {
   month: 'calendar-month-outline',
@@ -32,22 +32,22 @@ export default function SortingScreen() {
       <Card style={{ gap: 8 }}>
         <Text style={ty.label}>{t.preview}</Text>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-          <MaterialCommunityIcons name="folder-network" size={18} color={C.accent} />
+          <Icon name="folder-network" size={18} color={C.accent} />
           <Text style={[ty.mono, { color: C.text }]} numberOfLines={1}>{root.replace(/\//g, '\\')}</Text>
         </View>
         {samples.map((m) => {
-          const dir = folderFor(m, sorting, lang);
+          const dir = folderFor(m, sorting, pc.lang ?? lang);
           const parts = dir ? dir.split('/') : [];
           return (
             <View key={m.name} style={{ gap: 2 }}>
               {parts.map((part, i) => (
                 <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingLeft: 14 + i * 16 }}>
-                  <MaterialCommunityIcons name="folder" size={16} color={C.accent2} />
+                  <Icon name="folder" size={16} color={C.accent2} />
                   <Text style={[ty.mono, { color: C.text }]}>{part}</Text>
                 </View>
               ))}
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingLeft: 14 + parts.length * 16 }}>
-                <MaterialCommunityIcons name={m.video ? 'file-video-outline' : 'file-image-outline'} size={16} color={C.muted} />
+                <Icon name={m.video ? 'file-video-outline' : 'file-image-outline'} size={16} color={C.muted} />
                 <Text style={ty.mono} numberOfLines={1}>{m.name}</Text>
               </View>
             </View>
@@ -65,24 +65,26 @@ export default function SortingScreen() {
               tap();
               setSorting({ ...sorting, layout: l });
             }}
+            accessibilityRole="radio"
+            accessibilityState={{ selected: on, checked: on }}
             style={({ pressed }) => ({
               flexDirection: 'row', alignItems: 'center', gap: 14, padding: 16, borderRadius: 20,
-              backgroundColor: on ? 'rgba(124,108,255,0.14)' : pressed ? C.surfaceHi : C.surface,
+              backgroundColor: on ? C.selected : pressed ? C.surfaceHi : C.surface,
               borderWidth: 1, borderColor: on ? C.accent : C.line,
             })}
           >
-            <MaterialCommunityIcons name={ICONS[l]} size={24} color={on ? C.accent : C.muted} />
+            <Icon name={ICONS[l]} size={24} color={on ? C.accent : C.muted} />
             <View style={{ flex: 1, gap: 2 }}>
               <Text style={[ty.h3, on && { color: C.accent }]}>{name}</Text>
               <Text style={ty.small}>{hint}</Text>
             </View>
-            <MaterialCommunityIcons name={on ? 'radiobox-marked' : 'radiobox-blank'} size={22} color={on ? C.accent : C.faint} />
+            <Icon name={on ? 'radiobox-marked' : 'radiobox-blank'} size={22} color={on ? C.accent : C.faint} />
           </Pressable>
         );
       })}
 
       <Card style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
-        <MaterialCommunityIcons name="file-tree-outline" size={24} color={C.accent2} />
+        <Icon name="file-tree-outline" size={24} color={C.accent2} />
         <View style={{ flex: 1, gap: 2 }}>
           <Text style={ty.h3}>{t.splitKinds}</Text>
           <Text style={ty.small}>{t.splitKindsHint}</Text>

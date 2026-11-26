@@ -46,6 +46,9 @@ final class Gallery {
     o.predicate = NSPredicate(format: "mediaType == %d OR mediaType == %d", PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
     o.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
     o.includeAssetSourceTypes = [.typeUserLibrary]
+    // Chaque image d'une rafale est son propre média : sans ça, seule l'image représentative
+    // était listée, et les autres n'arrivaient jamais sur le PC.
+    o.includeAllBurstAssets = true
     return o
   }
 
@@ -282,22 +285,46 @@ final class Gallery {
 
   // ---------------------------------------------------------------- libérer de la place
 
-  /** Supprime les photos dont tous les fichiers sont dans `uris` ; iOS demande confirmation. */
-  func remove(_ uris: [String], completion: @escaping (Bool, Error?) -> Void) {
-    do { try authorized() } catch { return completion(false, error) }
+  /**
+   * Supprime les photos dont tous les fichiers sont dans `uris` (iOS demande confirmation), et
+   * renvoie les uri vraiment supprimées. Une rafale n'est touchée que si toutes ses images sont
+   * dans la liste : PhotoKit pourrait sinon emporter des images jamais vérifiées.
+   */
+  func remove(_ uris: [String], completion: @escaping ([String], Error?) -> Void) {
+    do { try authorized() } catch { return completion([], error) }
     var kinds: [String: Set<String>] = [:]
+    var urisOf: [String: [String]] = [:]
     for uri in uris {
-      if let (id, kind) = Self.parse(uri) { kinds[id, default: []].insert(kind) }
+      if let (id, kind) = Self.parse(uri) {
+        kinds[id, default: []].insert(kind)
+        urisOf[id, default: []].append(uri)
+      }
     }
     var whole: [PHAsset] = []
     PHAsset.fetchAssets(withLocalIdentifiers: Array(kinds.keys), options: nil).enumerateObjects { a, _, _ in
       let needed = Set(Self.resources(of: a).map(\.kind))
       if !needed.isEmpty && needed.isSubset(of: kinds[a.localIdentifier] ?? []) { whole.append(a) }
     }
-    if whole.isEmpty { return completion(false, nil) }
+    let wholeIds = Set(whole.map(\.localIdentifier))
+    let burstOptions = PHFetchOptions()
+    burstOptions.includeAllBurstAssets = true
+    let safe = whole.filter { a in
+      guard let burst = a.burstIdentifier else { return true }
+      var complete = true
+      PHAsset.fetchAssets(withBurstIdentifier: burst, options: burstOptions).enumerateObjects { m, _, stop in
+        if !wholeIds.contains(m.localIdentifier) {
+          complete = false
+          stop.pointee = true
+        }
+      }
+      return complete
+    }
+    if safe.isEmpty { return completion([], nil) }
     PHPhotoLibrary.shared().performChanges({
-      PHAssetChangeRequest.deleteAssets(whole as NSArray)
-    }) { ok, _ in completion(ok, nil) }
+      PHAssetChangeRequest.deleteAssets(safe as NSArray)
+    }) { ok, _ in
+      completion(ok ? safe.flatMap { urisOf[$0.localIdentifier] ?? [] } : [], nil)
+    }
   }
 }
 
@@ -397,3 +424,34 @@ final class AssetReader: ByteSource {
     if running { PHAssetResourceManager.default().cancelDataRequest(id) }
   }
 }
+
+/**
+ * Compte les changements de la photothèque (photo prise, supprimée, sélection limitée modifiée) :
+ * tant que ce numéro ne bouge pas, le JS garde sa copie de la galerie au lieu de tout relire.
+ */
+final class LibraryWatch: NSObject, PHPhotoLibraryChangeObserver {
+  private let lock = NSLock()
+  private var changes = 0
+  private var registered = false
+
+  func version() -> String {
+    let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    lock.lock()
+    // On ne s'abonne qu'une fois l'accès donné : s'abonner avant ne voit rien.
+    let start = !registered && (status == .authorized || status == .limited)
+    if start { registered = true }
+    let n = changes
+    let on = registered
+    lock.unlock()
+    if start { PHPhotoLibrary.shared().register(self) }
+    // Pas encore abonné : version inconnue, le JS relit à chaque fois.
+    return on ? "\(status.rawValue):\(n)" : ""
+  }
+
+  func photoLibraryDidChange(_ changeInstance: PHChange) {
+    lock.lock()
+    changes += 1
+    lock.unlock()
+  }
+}
+

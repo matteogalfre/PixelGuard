@@ -1,0 +1,6 @@
+# Changes made to libsmb2 for PixelGuard
+
+libsmb2 is embedded here under the LGPL 2.1 (see `COPYING` and `LICENCE-LGPL-2.1.txt`). Upstream version: see `VERSION`. These are the only changes:
+
+- **2026-11-26: `SMB2_O_EXCLUSIVE_SHARE` open flag.** `include/smb2/libsmb2.h` defines it, and `open_flags_to_create_request()` in `lib/libsmb2.c` uses it to ask for read-only sharing instead of read and write. PixelGuard opens its `.part` files with it, so that two phones sending a file with the same name at the same time can't write into the same file: the second one gets `STATUS_SHARING_VIOLATION`.
+- **2026-11-26: server name check in the NTLM challenge.** `include/libsmb2-private.h` adds three fields to `struct smb2_context`, `include/smb2/libsmb2.h` declares `smb2_pg_set_expected_server_name()`, `smb2_pg_get_server_name()` and `smb2_pg_name_mismatch()` (implemented in `lib/init.c`). `ntlm_decode_challenge_message()` in `lib/ntlmssp.c` keeps the server's NetBIOS name (`MsvAvNbComputerName`), and `ntlmssp_generate_blob()` stops before building the AUTHENTICATE message if an expected name is set and the server announced another one. PixelGuard uses it so that a device answering at the paired PC's address under another name never receives the user name or the NTLM response.

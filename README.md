@@ -23,7 +23,7 @@ Obtainium keeps the app up to date straight from this repository's releases. And
 ## Features
 
 - [x] Sends photos and videos to a Windows shared folder over your home Wi-Fi
-- [x] Finds your PC on the network and lists its shared folders, you only type your Windows password
+- [x] Pairs with a QR code shown by the PC set-up file, or finds your PC on the network and lists its shared folders
 - [x] Pick the albums (Camera, WhatsApp, screenshots...), photos or videos, and the period: everything, this month, last month, the last 3 to 12 months, a year, or from one month to another
 - [x] Sorted on the PC the way you like: by month like PixelGuard (`2026 November`), by year, by album, or all in one folder
 - [x] Tells you before sending what's already on the PC and what's missing, and lets you untick photos or videos you don't want to send
@@ -39,20 +39,52 @@ Obtainium keeps the app up to date straight from this repository's releases. And
 
 ## Set up the PC (once)
 
-On Windows, press **Windows + X**, open **Terminal** (or PowerShell), paste this line and press Enter. If Windows asks whether to allow it, say yes: the command restarts itself as administrator.
+### Windows
+
+<a href="https://github.com/matteogalfre/PixelGuard/releases/latest/download/PixelGuard-PC.cmd"><b>⬇ Prepare my PC</b></a> (`PixelGuard-PC.cmd`, Windows 10 and 11)
+
+Download it on the PC and double-click it. Windows asks for administrator rights. It may first say "Windows protected your PC": click **More info › Run anyway**. The file isn't signed (signing costs money every year), but it's plain text you can read [here](tools/PixelGuard-PC.cmd) before running it. It downloads nothing and sends nothing. It:
+
+1. shares the folder your photos go to on your local network: `Pictures\PixelGuard` (the same one the desktop app uses), or any folder you pick. It warns you if that folder is synced by OneDrive;
+2. creates a `pixelguard` account just for the app, hidden from the sign-in screen, that can only write to that folder. Your own Windows password never leaves the PC, and the Microsoft account and PIN question goes away;
+3. allows file sharing on private networks, and offers to switch your Wi-Fi to Private if Windows has it as Public (on Public, the PC stays hidden);
+4. shows a QR code: in the app, tap **Scan the PC code** and you're done.
+
+Run it again later to get a new code for another phone, move the photos to another folder, or remove PixelGuard from the PC (your photos stay where they are).
+
+No Internet on the PC, or no way to get the link there? When you add a PC, the app shows a local address like `192.168.1.42:8800`: open it in the PC's browser and the phone hands over the file itself, over your Wi-Fi.
+
+Rather use a terminal? Open **Terminal (Admin)** and run:
 
 ```powershell
-$s='$d="$env:USERPROFILE\Pictures\PixelGuard"; md $d -Force >$null; if(-not(Get-SmbShare -Name PixelGuard -EA 0)){New-SmbShare -Name PixelGuard -Path $d -FullAccess "$env:USERDOMAIN\$env:USERNAME" >$null}; Get-NetFirewallRule -Group "@FirewallAPI.dll,-28502" | ? Profile -like "*Private*" | Enable-NetFirewallRule; Write-Host "PixelGuard is ready: $d" -ForegroundColor Green'; if(([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(544)){iex $s}else{Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-EncodedCommand',([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($s)))}
+irm https://raw.githubusercontent.com/matteogalfre/PixelGuard/main/tools/PixelGuard-PC.cmd | iex
 ```
 
-It creates `Pictures\PixelGuard` (the same folder the desktop app uses), shares it with your account, and allows file sharing on your private network only. Running it twice does no harm.
+<details>
+<summary>Or with your own Windows account</summary>
 
-Or by hand: right-click a folder › Properties › Sharing › Share. A Mac works too (System Settings › General › Sharing › File Sharing).
+Press **Windows + X**, open **Terminal**, paste this line and press Enter. It restarts itself as administrator, creates and shares `Pictures\PixelGuard` with your account, and allows file sharing on private networks. Then sign in from the app with your Windows user and password (with a Microsoft account: your Microsoft e-mail and its password, not the PIN).
+
+```powershell
+$s='$d="$env:USERPROFILE\Pictures\PixelGuard"; md $d -Force >$null; if(-not(Get-SmbShare -Name PixelGuard -EA 0)){New-SmbShare -Name PixelGuard -Path $d -FullAccess "$env:USERDOMAIN\$env:USERNAME" >$null}; Get-NetFirewallRule -Group "@FirewallAPI.dll,-28502" | ? Profile -like "*Private*" | Enable-NetFirewallRule; if(Get-NetConnectionProfile | ? NetworkCategory -eq Public){Write-Host "Warning: this network is set to Public on this PC. Switch it to Private (Settings › Network and internet › Wi-Fi), or the phone will not see it." -ForegroundColor Yellow}; Write-Host "PixelGuard is ready: $d" -ForegroundColor Green; Write-Host "User name to type in PixelGuard: $env:USERNAME" -ForegroundColor Green'; if(([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(544)){iex $s}else{Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-EncodedCommand',([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($s)))}
+```
+</details>
+
+### Mac
+
+Nothing to download:
+
+1. System Settings › General › Sharing: turn on **File Sharing**.
+2. Click the ⓘ next to it, add a folder (for example Pictures › PixelGuard) and give yourself **Read & Write**.
+3. Options…: tick **Share files and folders using SMB**, and your account under **Windows File Sharing**.
+4. In the app, pick your Mac in the list and sign in with your Mac account name and password.
+
+To keep your password to yourself, create a **Sharing Only** user (System Settings › Users & Groups › Add User) and use that one.
 
 ## How to use
 
 1. Open the app and allow access to your photos (and to their location, so the GPS data is kept).
-2. Tap the ⚙ button: your PC shows up, sign in with your Windows user and password, pick the shared folder. With a Microsoft account, it's your Microsoft password, not your PIN.
+2. Tap the ⚙ button, then **Scan the PC code** (or pick your PC in the list and sign in).
 3. Choose your albums and how files are sorted on the PC.
 4. Tap **Back up**.
 
@@ -67,7 +99,8 @@ Encryption costs some speed: the phone encrypts every packet and the PC decrypts
 ## Privacy and security
 
 - Your photos go straight from the phone to your PC. The app talks to nothing else, not even to check for updates.
-- Transfers are encrypted when the PC supports SMB 3 (Windows 10 and 11, macOS). The app tells you if they aren't.
+- Transfers are encrypted when the PC supports SMB 3 (Windows 10 and 11, macOS). If it doesn't, the app says so when you pair it. Once encryption is on, it never quietly falls back to unencrypted: the backup stops instead.
+- The app remembers the name your PC announces when you pair it, and checks it before every sign-in. A device that answers at the same address under another name (a hotel or a friend's Wi-Fi) gets neither your user name nor the answer to your password.
 - Your password never travels in the clear, and it's stored encrypted in the Android Keystore. Use a long one: anyone on your network who captures a sign-in could try to guess it offline.
 - Nothing is deleted from the phone without a byte by byte check and Android's own confirmation, and it goes to the trash first.
 

@@ -1,4 +1,3 @@
-import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useCallback, useEffect, useState } from 'react';
 import { Alert, Platform, Text, View } from 'react-native';
@@ -15,7 +14,7 @@ import { lang, t } from '../i18n';
 import { humanBytes, humanDuration } from '../logic';
 import { errorMessage } from '../native';
 import { useApp } from '../state';
-import { C, Card, Header, MainButton, Ring, Screen, Segmented, success, t as ty, Thumb } from '../ui/kit';
+import { Icon, C, Card, Header, MainButton, Ring, Screen, Segmented, success, t as ty, Thumb } from '../ui/kit';
 
 /** Libère l'écran allumé, sans planter s'il n'avait pas pu être activé. */
 function releaseAwake(tag: string) {
@@ -59,9 +58,13 @@ export default function Free() {
       setProgress(null);
       const notes: string[] = [];
       if (!v.cancelled && v.same.length) {
-        const ok = await moveToTrash(app.pc.id, v.same);
-        notes.push(ok ? t.freeDone(v.same.length, size(v.same.reduce((n, c) => n + c.item.size, 0))) : t.freeRefused);
+        const gone = await moveToTrash(app.pc.id, v.same);
+        const ok = gone.length > 0;
+        notes.push(ok ? t.freeDone(gone.length, size(gone.reduce((n, c) => n + c.item.size, 0))) : t.freeRefused);
         if (ok) success();
+        const kept = new Set(gone.map((c) => c.item.id));
+        const left = v.same.filter((c) => !kept.has(c.item.id)).length;
+        if (ok && left) notes.push(t.freeKept(left));
       }
       if (v.different.length) notes.push(t.freeDifferent(v.different.length));
       setMessage(notes.join('\n') || t.freeRefused);
@@ -83,9 +86,9 @@ export default function Free() {
         <View style={{ height: 8 }} />
         <Text style={ty.label}>{t.phase.verify}</Text>
         <View style={{ alignItems: 'center', marginVertical: 8 }}>
-          <Ring value={ratio} size={230} stroke={16}>
-            <Text style={ty.big}>{Math.floor(ratio * 100)} %</Text>
-            <Text style={ty.small}>{t.files(progress.doneFiles, progress.totalFiles)}</Text>
+          <Ring value={ratio} size={230} stroke={16} label={`${Math.floor(ratio * 100)} %, ${t.files(progress.doneFiles, progress.totalFiles)}`}>
+            <Text style={ty.big} maxFontSizeMultiplier={1.3}>{Math.floor(ratio * 100)} %</Text>
+            <Text style={ty.small} maxFontSizeMultiplier={1.3}>{t.files(progress.doneFiles, progress.totalFiles)}</Text>
           </Ring>
         </View>
         <Text style={[ty.small, { textAlign: 'center' }]}>
@@ -110,12 +113,12 @@ export default function Free() {
       <Segmented options={[0, 30, 90, 365].map((d) => ({ value: d, label: t.ages[d] }))} value={age} onChange={setAge} />
 
       <Card style={{ alignItems: 'center', paddingVertical: 28, gap: 6 }}>
-        <MaterialCommunityIcons name="broom" size={30} color={C.accent2} />
+        <Icon name="broom" size={30} color={C.accent2} />
         {candidates == null ? (
           <Text style={ty.small}>…</Text>
         ) : candidates.length ? (
           <>
-            <Text style={ty.big}>{size(bytes)}</Text>
+            <Text style={ty.big} maxFontSizeMultiplier={1.3}>{size(bytes)}</Text>
             <Text style={ty.small}>{t.freeCount(candidates.length)}</Text>
             <View style={{ flexDirection: 'row', marginTop: 8 }}>
               {candidates.slice(0, 6).map((c, i) => (

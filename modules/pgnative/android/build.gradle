@@ -20,4 +20,7 @@ android {
 dependencies {
   // Client SMB 2/3 en Java pur (Apache-2.0).
   implementation 'com.hierynomus:smbj:0.15.0'
+  // Lecture du QR affiché par le PC (Apache-2.0) : ZXing, sans services Google ni envoi de
+  // statistiques (expo-camera passe par ML Kit sur Android, qui en envoie).
+  implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
 }

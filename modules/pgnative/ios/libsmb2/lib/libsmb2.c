@@ -1619,7 +1619,10 @@ open_flags_to_create_request(struct smb2_create_request *req,
         req->impersonation_level = SMB2_IMPERSONATION_IMPERSONATION;
         req->desired_access = desired_access;
         req->file_attributes = file_attributes;
-        req->share_access = SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE;
+        /* PixelGuard patch: SMB2_O_EXCLUSIVE_SHARE keeps other writers out. */
+        req->share_access = (flags & SMB2_O_EXCLUSIVE_SHARE) ?
+                SMB2_FILE_SHARE_READ :
+                SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE;
         req->create_disposition = create_disposition;
         req->create_options = create_options;
         req->name = path;

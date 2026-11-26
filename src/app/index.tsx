@@ -1,19 +1,17 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import * as Network from 'expo-network';
-import { router, useFocusEffect } from 'expo-router';
+import { Redirect, router, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, Pressable, Text, View } from 'react-native';
 
 import { preview, runBackup, stop, type BackupResult, type Progress } from '../engine';
 import { ago, lang, periodLabel, t } from '../i18n';
-import { folderFor, humanBytes, humanDuration, joinPath } from '../logic';
-import { errorMessage, isDemo, Pg } from '../native';
+import { folderFor, humanBytes, humanDuration, joinPath, typicalRate } from '../logic';
+import { errorCode, errorMessage, isDemo, Pg } from '../native';
 import { useApp } from '../state';
 import { Logo } from '../ui/Logo';
-import {
-  Bar, C, Card, Dot, F, IconButton, MainButton, Ring, Screen, Segmented, Sparkline, success, t as ty, tap, Thumb,
-} from '../ui/kit';
+import { Bar, C, Card, DoneCheck, Dot, F, Icon, IconButton, MainButton, Ring, Screen, Segmented, Sparkline, success, t as ty, tap, Thumb } from '../ui/kit';
 
 /** Libère l'écran allumé, sans planter s'il n'avait pas pu être activé. */
 function releaseAwake(tag: string) {
@@ -66,6 +64,9 @@ export default function Home() {
     }, [pc.host, pc.id]),
   );
 
+  // Ce qu'on compare : si ça change pendant une comparaison, son résultat ne vaut plus rien.
+  const selectionKey = JSON.stringify([selected, app.kinds, app.period, app.sorting, pc.id, pc.lang]);
+
   // Dès que le PC répond, on compare : « X déjà là, il manque celles-là ». Relancé quand la
   // sélection change (albums, type, période, rangement, PC), sans rien envoyer.
   useEffect(() => {
@@ -92,7 +93,7 @@ export default function Home() {
       cmpRun.current++;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [online, configured, app.ready, running, cmp, pc.id]);
+  }, [online, configured, app.ready, running, cmp, selectionKey]);
 
   useEffect(() => {
     if (!progress || progress.phase !== 'send') return;
@@ -104,14 +105,23 @@ export default function Home() {
 
   if (!app.ready) return <Screen>{null}</Screen>;
 
-  if (app.access === 'none' || app.access === 'unknown') {
+  // Premier lancement : trois écrans (photos, PC, albums) au lieu de tout l'accueil d'un coup.
+  if (!app.welcomeDone && app.pcs.length === 0) return <Redirect href="/welcome" />;
+
+  if (app.access === 'none' || app.access === 'blocked' || app.access === 'unknown') {
+    const blocked = app.access === 'blocked';
     return (
       <Screen>
         <View style={{ height: 80 }} />
         <Logo size={64} />
-        <Text style={ty.h1}>{t.permTitle}</Text>
+        <Text style={ty.h1} accessibilityRole="header">{t.permTitle}</Text>
         <Text style={ty.sub}>{t.permText}</Text>
-        <MainButton label={t.permButton} icon="image-multiple" onPress={app.requestAccess} />
+        {blocked ? <Text style={[ty.body, { color: C.warn }]}>{t.permBlocked}</Text> : null}
+        <MainButton
+          label={blocked ? t.permSettings : t.permButton}
+          icon={blocked ? 'cog-outline' : 'image-multiple'}
+          onPress={app.requestAccess}
+        />
       </Screen>
     );
   }
@@ -134,13 +144,15 @@ export default function Home() {
         exclude: excluded, onProgress: setProgress,
       });
       setResult(r);
-      await app.addToHistory({
+      // Rien à envoyer, rien d'échoué : pas de ligne vide dans l'historique.
+      if (r.uploaded || r.failed || r.cancelled) await app.addToHistory({
         at: Date.now(), pcName: pc.name || pc.host, uploaded: r.uploaded, skipped: r.skipped, failed: r.failed,
         bytes: r.bytes, seconds: r.seconds, cancelled: r.cancelled, encrypted: r.encrypted,
       });
       if (!r.failed && !r.cancelled) success();
     } catch (e) {
-      Alert.alert('PixelGuard', errorMessage(e));
+      // Arrêté avant le premier envoi (pendant la comparaison) : rien à signaler.
+      if (errorCode(e) !== 'CANCELLED') Alert.alert('PixelGuard', errorMessage(e));
     } finally {
       releaseAwake(KEEP_AWAKE);
       setProgress(null);
@@ -159,11 +171,11 @@ export default function Home() {
         <View style={{ height: 8 }} />
         <Text style={ty.label}>{t.phase[progress.phase]}</Text>
         <View style={{ alignItems: 'center', marginVertical: 8 }}>
-          <Ring value={sending ? ratio : 0} size={230} stroke={16}>
+          <Ring value={sending ? ratio : 0} size={230} stroke={16} label={sending ? `${Math.floor(ratio * 100)} %, ${t.files(progress.doneFiles, progress.totalFiles)}` : t.phase[progress.phase]}>
             {sending ? (
               <>
-                <Text style={ty.big}>{Math.floor(ratio * 100)} %</Text>
-                <Text style={ty.small}>{t.files(progress.doneFiles, progress.totalFiles)}</Text>
+                <Text style={ty.big} maxFontSizeMultiplier={1.3}>{Math.floor(ratio * 100)} %</Text>
+                <Text style={ty.small} maxFontSizeMultiplier={1.3}>{t.files(progress.doneFiles, progress.totalFiles)}</Text>
               </>
             ) : (
               <Text style={[ty.small, { textAlign: 'center', paddingHorizontal: 30 }]}>{progress.detail ?? '…'}</Text>
@@ -241,8 +253,12 @@ export default function Home() {
     statusColor = C.muted;
   }
 
+  // Une grosse sauvegarde (la première sur « Tout », souvent) : combien de temps, à peu près.
+  const measuredRate = typicalRate(app.history);
+  const etaSeconds = cmp && toSend.length ? toSendBytes / (measuredRate ?? 25e6) : 0;
+
   const sample = stats?.samples[0] ?? { name: '20261125_093012.jpg', taken: 0, modified: 0, bucketName: 'Camera', video: false };
-  const sortingExample = joinPath(pc.share || 'PixelGuard', pc.folder, folderFor(sample, app.sorting, lang), sample.name).replace(/\//g, ' › ');
+  const sortingExample = joinPath(pc.share || 'PixelGuard', pc.folder, folderFor(sample, app.sorting, pc.lang ?? lang), sample.name).replace(/\//g, ' › ');
 
   return (
     <Screen>
@@ -257,23 +273,42 @@ export default function Home() {
         </View>
       </View>
       {isDemo ? <Text style={[ty.small, { color: C.warn }]}>{t.demo}</Text> : null}
+      {app.access === 'limited' ? (
+        <Card style={{ borderColor: C.warnLine, gap: 8 }}>
+          <Alert2 icon="image-lock-outline" color={C.warn} text={t.permLimited} />
+          <Pressable onPress={app.moreAccess} accessibilityRole="button" hitSlop={10} style={{ alignSelf: 'flex-start', minHeight: 32, justifyContent: 'center' }}>
+            <Text style={[ty.small, { color: C.accent, fontFamily: F.semi }]}>{t.permWiden}</Text>
+          </Pressable>
+        </Card>
+      ) : null}
 
       <View style={{ alignItems: 'center', marginTop: 8 }}>
-        <Ring value={ratio} size={230} stroke={16}>
-          <Text style={ty.big}>{center}</Text>
+        <Ring value={ratio} size={230} stroke={16} label={`${center}, ${caption}`}>
+          <Text style={ty.big} maxFontSizeMultiplier={1.3}>{center}</Text>
           {/* Reste dans le cercle : une légende longue passe sur deux lignes au lieu de mordre sur l'anneau. */}
-          <Text numberOfLines={2} style={[ty.small, { textAlign: 'center', maxWidth: 160 }]}>{caption}</Text>
+          <Text numberOfLines={2} maxFontSizeMultiplier={1.3} style={[ty.small, { textAlign: 'center', maxWidth: 160 }]}>{caption}</Text>
         </Ring>
-        {status ? <Text style={[ty.h3, { marginTop: 14, color: statusColor, textAlign: 'center' }]}>{status}</Text> : null}
+        {status ? (
+          <Text accessibilityLiveRegion="polite" style={[ty.h3, { marginTop: 14, color: statusColor, textAlign: 'center' }]}>{status}</Text>
+        ) : null}
+        {etaSeconds > 120 ? (
+          <Text style={[ty.small, { textAlign: 'center', marginTop: 2 }]}>{t.estimate(humanDuration(etaSeconds), measuredRate != null)}</Text>
+        ) : null}
+        {etaSeconds > 1800 ? <Text style={[ty.hint, { textAlign: 'center', marginTop: 2, paddingHorizontal: 12 }]}>{t.longTip}</Text> : null}
         {lastRun ? (
-          <Pressable onPress={() => router.push('/history')} hitSlop={6}>
+          <Pressable onPress={() => router.push('/history')} accessibilityRole="button" hitSlop={12}>
             <Text style={[ty.small, { marginTop: 2 }]}>{t.lastRun(ago(lastRun.at))}</Text>
           </Pressable>
         ) : null}
       </View>
 
-      {result ? (
-        <Card style={{ borderColor: result.failed ? C.warn : 'rgba(55,214,154,0.35)' }}>
+      {result && !result.failed && !result.cancelled ? (
+        <DoneCheck
+          title={t.allSafe}
+          detail={`${t.result(result.uploaded, result.skipped, result.failed)} · ${humanDuration(result.seconds)}`}
+        />
+      ) : result ? (
+        <Card style={{ borderColor: result.failed ? C.warn : C.okLine }}>
           <Text style={[ty.h3, { color: result.failed ? C.warn : C.ok }]}>{t.result(result.uploaded, result.skipped, result.failed)}</Text>
           <Text style={ty.small}>{t.resultTime(size(result.bytes), humanDuration(result.seconds))}</Text>
           {result.cancelled ? <Text style={[ty.small, { color: C.warn }]}>{t.stopped}</Text> : null}
@@ -285,7 +320,7 @@ export default function Home() {
 
       <View style={{ flexDirection: 'row', gap: 12 }}>
         <Card style={{ flex: 1 }} onPress={() => router.push('/pc')}>
-          <MaterialCommunityIcons name="monitor" size={22} color={C.accent} />
+          <Icon name="monitor" size={22} color={C.accent} />
           <Text style={ty.h3} numberOfLines={1}>{configured ? pc.name || pc.host : t.noPc}</Text>
           {configured ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -301,7 +336,7 @@ export default function Home() {
             {chosen.slice(0, 4).map((a, i) => (
               <Thumb key={a.id} uri={a.cover} size={22} radius={11} style={{ marginLeft: i ? -6 : 0, borderWidth: 1.5, borderColor: C.bg }} />
             ))}
-            {chosen.length === 0 ? <MaterialCommunityIcons name="image-multiple-outline" size={22} color={C.accent} /> : null}
+            {chosen.length === 0 ? <Icon name="image-multiple-outline" size={22} color={C.accent} /> : null}
           </View>
           <Text style={ty.h3}>{t.sources}</Text>
           <Text style={ty.small} numberOfLines={1}>
@@ -311,12 +346,12 @@ export default function Home() {
       </View>
 
       <Card onPress={() => router.push('/sorting')} style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
-        <MaterialCommunityIcons name="file-tree-outline" size={24} color={C.accent} />
+        <Icon name="file-tree-outline" size={24} color={C.accent} />
         <View style={{ flex: 1, gap: 2 }}>
           <Text style={ty.h3}>{t.sortingRow}</Text>
           <Text style={ty.mono} numberOfLines={1}>{sortingExample}</Text>
         </View>
-        <MaterialCommunityIcons name="chevron-right" size={22} color={C.muted} />
+        <Icon name="chevron-right" size={22} color={C.muted} />
       </Card>
 
       <Segmented<string>
@@ -334,7 +369,7 @@ export default function Home() {
       <MainButton
         label={!configured ? t.noPc : cmp ? (toSend.length ? t.backupN(toSend.length) : t.checkAgain) : t.backup}
         icon={!configured ? 'monitor' : 'cloud-upload'}
-        onPress={backup}
+        onPress={configured && cmp && cmp.missing.length === 0 ? () => app.setPreview(null) : backup}
         disabled={configured && (chosen.length === 0 || (!!cmp && cmp.missing.length > 0 && toSend.length === 0))}
       />
 
@@ -344,7 +379,7 @@ export default function Home() {
             <Text style={ty.label}>{t.cmpTitle}</Text>
             {cmpState === 'running' ? <ActivityIndicator size="small" color={C.accent} /> : null}
             {cmp && cmp.missing.length ? (
-              <Pressable onPress={() => { tap(); router.push('/review'); }} hitSlop={8}>
+              <Pressable onPress={() => { tap(); router.push('/review'); }} accessibilityRole="button" hitSlop={14}>
                 <Text style={[ty.small, { color: C.accent, fontFamily: F.semi }]}>{t.choose}</Text>
               </Pressable>
             ) : null}
@@ -354,17 +389,22 @@ export default function Home() {
           {cmp && online !== false ? (
             <View style={{ gap: 10 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <MaterialCommunityIcons name="check-circle" size={18} color={C.ok} />
+                <Icon name="check-circle" size={18} color={C.ok} />
                 <Text style={ty.body}>{t.cmpAlready(cmp.already, size(cmp.alreadyBytes))}</Text>
               </View>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <MaterialCommunityIcons name={cmp.missing.length ? 'arrow-up-circle' : 'check-all'} size={18} color={cmp.missing.length ? C.accent : C.ok} />
+                <Icon name={cmp.missing.length ? 'arrow-up-circle' : 'check-all'} size={18} color={cmp.missing.length ? C.accent : C.ok} />
                 <Text style={ty.body}>
                   {cmp.missing.length ? t.cmpMissing(cmp.missing.length, size(cmp.missingBytes)) : t.cmpNothingMissing}
                 </Text>
               </View>
               {cmp.missing.length ? (
-                <Pressable onPress={() => router.push('/review')} style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
+                <Pressable
+                  onPress={() => router.push('/review')}
+                  accessibilityRole="button"
+                  accessibilityLabel={t.choose}
+                  style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}
+                >
                   {cmp.missing.slice(0, 7).map((m) => (
                     <Thumb key={m.id} uri={m.uri} size={40} radius={10} style={excluded.has(m.id) ? { opacity: 0.25 } : undefined} />
                   ))}
@@ -379,7 +419,6 @@ export default function Home() {
               {cmp.renamed > 0 ? <Alert2 icon="alert" color={C.warn} text={t.cmpRenamed(cmp.renamed)} /> : null}
               {cmp.extraOnPc > 0 ? <Alert2 icon="information" color={C.muted} text={t.cmpExtra(cmp.extraOnPc)} /> : null}
               {!cmp.encrypted ? <Alert2 icon="lock-open-alert" color={C.warn} text={t.cmpNotEncrypted} /> : null}
-              {cmp.checkedOneByOne > 0 ? <Alert2 icon="magnify-scan" color={C.muted} text={t.cmpChecked(cmp.checkedOneByOne)} /> : null}
             </View>
           ) : null}
         </Card>
@@ -387,14 +426,19 @@ export default function Home() {
 
       {stats && stats.saved > 0 ? (
         <Card onPress={() => router.push('/free')} style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
-          <MaterialCommunityIcons name="broom" size={24} color={C.accent2} />
+          <Icon name="broom" size={24} color={C.accent2} />
           <View style={{ flex: 1 }}>
             <Text style={ty.h3}>{t.freeRow}</Text>
             <Text style={ty.small}>{t.freeRowSub(size(stats.savedBytes))}</Text>
           </View>
-          <MaterialCommunityIcons name="chevron-right" size={22} color={C.muted} />
+          <Icon name="chevron-right" size={22} color={C.muted} />
         </Card>
       ) : null}
+
+      {/* Toujours atteignable, même avant d'avoir ajouté un PC. */}
+      <Pressable onPress={() => router.push('/about')} accessibilityRole="button" hitSlop={10} style={{ alignSelf: 'center', padding: 10 }}>
+        <Text style={[ty.small, { color: C.muted }]}>{t.aboutRow}</Text>
+      </Pressable>
     </Screen>
   );
 }
@@ -402,7 +446,7 @@ export default function Home() {
 function Alert2({ icon, color, text }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; color: string; text: string }) {
   return (
     <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 8 }}>
-      <MaterialCommunityIcons name={icon} size={16} color={color} style={{ marginTop: 2 }} />
+      <Icon name={icon} size={16} color={color} style={{ marginTop: 2 }} />
       <Text style={[ty.small, { flex: 1, color }]}>{text}</Text>
     </View>
   );

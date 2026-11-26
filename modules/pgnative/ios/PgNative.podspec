@@ -14,9 +14,9 @@ Pod::Spec.new do |s|
   s.dependency 'ExpoModulesCore'
   s.frameworks = 'Photos', 'CryptoKit'
 
-  # libsmb2 (LGPL-2.1+) est compilé avec le module : seul PgSmb.h est visible du Swift.
+  # libsmb2 (LGPL-2.1+) est compilé avec le module : seuls PgSmb.h et PgHttp.h sont visibles du Swift.
   s.source_files = '*.{h,c,swift}', 'libsmb2/lib/*.{c,h}', 'libsmb2/include/*.h', 'libsmb2/include/apple/*.h', 'libsmb2/include/smb2/*.h'
-  s.public_header_files = 'PgSmb.h'
+  s.public_header_files = 'PgSmb.h', 'PgHttp.h'
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'SWIFT_COMPILATION_MODE' => 'wholemodule',

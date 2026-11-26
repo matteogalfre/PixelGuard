@@ -14,8 +14,11 @@ if [ "$1" = "--serve" ]; then
 fi
 $W/venv/bin/python -I smbserver.py PHOTOS $W/share 4445 >/dev/null 2>&1 &
 SERVER=$!
-trap 'kill $SERVER' EXIT
-i=0; until nc -z 127.0.0.1 4445 2>/dev/null || [ $i -ge 40 ]; do sleep 0.5; i=$((i+1)); done
+# Un second serveur, que le test coupe pour vérifier qu'une connexion fermée par le PC se voit.
+$W/venv/bin/python -I smbserver.py PHOTOS $W/share 4446 >/dev/null 2>&1 &
+SERVER2=$!
+trap 'kill $SERVER $SERVER2 2>/dev/null' EXIT
+i=0; until { nc -z 127.0.0.1 4445 && nc -z 127.0.0.1 4446; } 2>/dev/null || [ $i -ge 40 ]; do sleep 0.5; i=$((i+1)); done
 rm -rf "$W/share/Tel"
 L=../ios/libsmb2
 FLAGS="-O2 -DHAVE_CONFIG_H=1 -D_U_=__attribute__((unused)) -I$L/include -I$L/include/apple -I$L/include/smb2 -I$L/lib"
@@ -25,4 +28,7 @@ if [ ! -f $W/out/libsmb2.a ]; then
   ar rcs $W/out/libsmb2.a $W/out/*.o
 fi
 clang $FLAGS -Wall -Wextra -Wno-unused-parameter ../ios/PgSmb.c core_test.c $W/out/libsmb2.a -lpthread -o $W/out/core_test
-$W/out/core_test "$W/share"
+$W/out/core_test "$W/share" $SERVER2
+# Le petit serveur qui donne « Prepare my PC » au navigateur du PC.
+clang -Wall -Wextra -O2 ../ios/PgHttp.c http_test.c -lpthread -o $W/out/http_test
+$W/out/http_test ../../../tools/PixelGuard-PC.cmd

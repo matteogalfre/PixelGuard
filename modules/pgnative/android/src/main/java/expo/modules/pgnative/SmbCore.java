@@ -9,7 +9,13 @@ import com.hierynomus.mssmb2.SMB2CreateDisposition;
 import com.hierynomus.mssmb2.SMB2ImpersonationLevel;
 import com.hierynomus.mssmb2.SMB2ShareAccess;
 import com.hierynomus.mssmb2.SMBApiException;
+import com.hierynomus.protocol.commons.Factory;
 import com.hierynomus.smbj.SmbConfig;
+import com.hierynomus.smbj.auth.AuthenticateResponse;
+import com.hierynomus.smbj.auth.AuthenticationContext;
+import com.hierynomus.smbj.auth.Authenticator;
+import com.hierynomus.smbj.auth.NtlmAuthenticator;
+import com.hierynomus.smbj.connection.ConnectionContext;
 import com.hierynomus.smbj.session.Session;
 import com.hierynomus.smbj.share.DiskShare;
 import com.hierynomus.smbj.share.File;
@@ -58,6 +64,13 @@ public final class SmbCore {
     }
   }
 
+  /** Le « .part » est ouvert par quelqu'un d'autre (un autre téléphone envoie le même nom). */
+  public static final class Busy extends IOException {
+    public Busy() {
+      super("Le PC garde ce fichier ouvert (autre appareil, ou envoi coupé à l'instant) : il repartira à la prochaine sauvegarde");
+    }
+  }
+
   public static final class Cancelled extends IOException {
     public Cancelled() {
       super("Arrêté");
@@ -66,7 +79,112 @@ public final class SmbCore {
 
   /** `encrypt` : demander le chiffrement SMB 3 (AES) ; la signature reste de toute façon. */
   public static SmbConfig config(boolean encrypt) {
+    return config(encrypt, new Pin(""));
+  }
+
+  /**
+   * Le nom NetBIOS que le PC annonce dans son défi NTLM (`seen`), et celui qu'il doit annoncer
+   * (`expected`, vide : pas de contrôle). Windows change d'identifiant SMB à chaque démarrage,
+   * pas de nom : c'est le nom qui dit si c'est bien le PC appairé.
+   */
+  public static final class Pin {
+    public final String expected;
+    public volatile String seen = null;
+    public volatile boolean mismatch = false;
+
+    public Pin(String expected) {
+      this.expected = expected == null ? "" : expected.trim();
+    }
+  }
+
+  private static int le16(byte[] b, int i) {
+    return (b[i] & 0xff) | (b[i + 1] & 0xff) << 8;
+  }
+
+  private static int le32(byte[] b, int i) {
+    return le16(b, i) | le16(b, i + 2) << 16;
+  }
+
+  /**
+   * Cherche un défi NTLM (message de type 2) dans un jeton SPNEGO. Renvoie null s'il n'y en a pas,
+   * "" s'il n'annonce pas de nom NetBIOS (MsvAvNbComputerName), sinon ce nom.
+   */
+  public static String ntlmServerName(byte[] token) {
+    if (token == null) return null;
+    byte[] sig = {'N', 'T', 'L', 'M', 'S', 'S', 'P', 0};
+    outer:
+    for (int i = 0; i + 48 <= token.length; i++) {
+      for (int k = 0; k < sig.length; k++) {
+        if (token[i + k] != sig[k]) continue outer;
+      }
+      if (le32(token, i + 8) != 2) return null;
+      int len = le16(token, i + 40);
+      long off = le32(token, i + 44) & 0xffffffffL;
+      long end = i + off + len;
+      if (end > token.length) return "";
+      int p = (int) (i + off);
+      while (p + 4 <= end) {
+        int id = le16(token, p);
+        int n = le16(token, p + 2);
+        if (id == 0 || p + 4 + n > end) break;
+        if (id == 1) return new String(token, p + 4, n, StandardCharsets.UTF_16LE);
+        p += 4 + n;
+      }
+      return "";
+    }
+    return null;
+  }
+
+  /**
+   * NTLM de smbj, avec un contrôle avant de répondre au défi : si le PC annonce un autre nom que
+   * celui appairé, on s'arrête là. Ni l'utilisateur ni la réponse au mot de passe ne partent.
+   */
+  static final class PinnedNtlm implements Authenticator {
+    private final NtlmAuthenticator inner = new NtlmAuthenticator();
+    private final Pin pin;
+
+    PinnedNtlm(Pin pin) {
+      this.pin = pin;
+    }
+
+    @Override
+    public void init(SmbConfig config) {
+      inner.init(config);
+    }
+
+    @Override
+    public boolean supports(AuthenticationContext context) {
+      return inner.supports(context);
+    }
+
+    @Override
+    public AuthenticateResponse authenticate(AuthenticationContext context, byte[] gssToken, ConnectionContext connectionContext)
+        throws IOException {
+      String name = ntlmServerName(gssToken);
+      if (name != null) {
+        pin.seen = name;
+        if (!pin.expected.isEmpty() && !name.equalsIgnoreCase(pin.expected)) {
+          pin.mismatch = true;
+          throw new IOException("Ce n'est pas le PC appairé");
+        }
+      }
+      return inner.authenticate(context, gssToken, connectionContext);
+    }
+  }
+
+  public static SmbConfig config(boolean encrypt, Pin pin) {
     return SmbConfig.builder()
+        .withAuthenticators(new Factory.Named<Authenticator>() {
+          @Override
+          public String getName() {
+            return "NTLM";
+          }
+
+          @Override
+          public Authenticator create() {
+            return new PinnedNtlm(pin);
+          }
+        })
         .withSecurityProvider(new HybridSecurityProvider())
         .withTimeout(60, TimeUnit.SECONDS)
         .withSoTimeout(90, TimeUnit.SECONDS)
@@ -148,6 +266,16 @@ public final class SmbCore {
     return filled;
   }
 
+  private static void drain(ArrayDeque<Future<Long>> inflight) {
+    while (!inflight.isEmpty()) {
+      try {
+        inflight.poll().get(5, TimeUnit.SECONDS);
+      } catch (Exception ignored) {
+        // coupé ou refusé : la reprise repartira de toute façon avant ces écritures
+      }
+    }
+  }
+
   private static long await(Future<Long> f) throws IOException {
     try {
       Long n = f.get(120, TimeUnit.SECONDS);
@@ -196,19 +324,24 @@ public final class SmbCore {
   }
 
   /**
-   * Un « .part » laissé par un envoi coupé : on reprend s'il est assez gros et si ses derniers
-   * 64 Ko sont identiques au même endroit de l'original. Renvoie l'octet où reprendre (0 sinon)
-   * et laisse `in` positionné dessus.
+   * Un « .part » laissé par un envoi coupé. Les DEPTH dernières écritures étaient peut-être
+   * encore en route quand il a été coupé : le PC a pu appliquer une écriture plus loin sans la
+   * précédente, et laisser un trou de zéros. Tout ce qui précède `fin - DEPTH × CHUNK` a en
+   * revanche été confirmé. On reprend donc à ce point-là, si les 64 Ko juste avant sont
+   * identiques au même endroit de l'original. Renvoie l'octet où reprendre (0 sinon) et laisse
+   * `in` positionné dessus.
    */
-  private static long resumeOffset(File file, InputStream in, long existing, long expected) throws IOException {
+  static long resumeOffset(File file, InputStream in, long existing, long expected) throws IOException {
     if (existing < RESUME_MIN || expected <= existing) return 0;
-    int probe = (int) Math.min(RESUME_PROBE, existing);
+    long start = existing - (long) DEPTH * CHUNK;
+    int probe = (int) Math.min(RESUME_PROBE, start);
+    if (start <= 0 || probe <= 0) return 0;
     byte[] remote = new byte[probe];
-    if (readAt(file, remote, existing - probe, probe) != probe) return 0;
-    skipFully(in, existing - probe);
+    if (readAt(file, remote, start - probe, probe) != probe) return 0;
+    skipFully(in, start - probe);
     byte[] local = new byte[probe];
     if (readChunk(in, local, probe) != probe) return 0;
-    return Arrays.equals(remote, local) ? existing : 0;
+    return Arrays.equals(remote, local) ? start : 0;
   }
 
   /**
@@ -224,13 +357,21 @@ public final class SmbCore {
     int chunk = Math.max(4096, Math.min(CHUNK, maxWrite));
     String finalPath = smbPath(target);
     String part = finalPath + ".part";
-    File file = share.openFile(
-        part,
-        EnumSet.of(AccessMask.GENERIC_READ, AccessMask.GENERIC_WRITE, AccessMask.DELETE),
-        EnumSet.of(FileAttributes.FILE_ATTRIBUTE_NORMAL),
-        SMB2ShareAccess.ALL,
-        keep ? SMB2CreateDisposition.FILE_OPEN_IF : SMB2CreateDisposition.FILE_OVERWRITE_IF,
-        null);
+    // Ouvert en exclusif (lecture partagée seulement) : si un autre téléphone envoie le même nom
+    // au même moment, le second est refusé au lieu de mélanger les deux fichiers.
+    File file;
+    try {
+      file = share.openFile(
+          part,
+          EnumSet.of(AccessMask.GENERIC_READ, AccessMask.GENERIC_WRITE, AccessMask.DELETE),
+          EnumSet.of(FileAttributes.FILE_ATTRIBUTE_NORMAL),
+          keep ? EnumSet.of(SMB2ShareAccess.FILE_SHARE_READ) : SMB2ShareAccess.ALL,
+          keep ? SMB2CreateDisposition.FILE_OPEN_IF : SMB2CreateDisposition.FILE_OVERWRITE_IF,
+          null);
+    } catch (SMBApiException e) {
+      if (e.getStatus() == NtStatus.STATUS_SHARING_VIOLATION) throw new Busy();
+      throw e;
+    }
     boolean ok = false;
     boolean resumable = false;
     InputStream in = null;
@@ -239,13 +380,13 @@ public final class SmbCore {
       in = source.open();
       long existing = keep ? file.getFileInformation(FileStandardInformation.class).getEndOfFile() : 0;
       long start = mayResume ? resumeOffset(file, in, existing, expected) : 0;
-      if (start == 0) {
-        if (existing > 0) {
-          // Rien à reprendre : on repart d'un fichier vide, et d'une source relue du début.
-          file.setLength(0);
-          in.close();
-          in = source.open();
-        }
+      // En reprise, tout ce qui suit le point de reprise est réécrit (un éventuel trou disparaît)
+      // jusqu'au bout de l'original, plus long que le « .part » : rien à tronquer.
+      if (start == 0 && existing > 0) {
+        // Rien à reprendre : on repart d'un fichier vide, et d'une source relue du début.
+        file.setLength(0);
+        in.close();
+        in = source.open();
       }
       long issued = start;
       acked = start;
@@ -282,8 +423,10 @@ public final class SmbCore {
         }
       } catch (Cancelled | com.hierynomus.protocol.transport.TransportException
                | com.hierynomus.smbj.common.SMBRuntimeException e) {
-        // Arrêt ou coupure réseau : ce qui est déjà écrit pourra servir à la reprise.
+        // Arrêt ou coupure réseau : ce qui est déjà écrit pourra servir à la reprise. On laisse
+        // d'abord revenir les écritures encore en route (quelques secondes au plus).
         resumable = keep;
+        drain(inflight);
         throw e;
       }
       if (expected >= 0 && acked != expected) {

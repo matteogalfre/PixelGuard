@@ -1,6 +1,8 @@
 // Teste PgSmb.c (le cœur SMB de l'iPhone) sur le Mac, contre le serveur SMB local d'impacket.
 // Mêmes cas que jvm-test/CoreTest.java, plus trois envois en parallèle sur trois connexions.
 #include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -179,6 +181,43 @@ int main(int argc, char **argv) {
   rc = pgs_connect("127.0.0.1:4499", "PHOTOS", NULL, "test", "test", 1, &bad, err, sizeof(err));
   printf("port fermé : code=%d (%s)\n", rc, rc == PGS_UNREACHABLE ? "UNREACHABLE, ok" : err);
 
+  // Le PC ferme une connexion restée inactive (ici : on arrête le second serveur). Elle doit être
+  // vue comme morte avant usage, et un appel doit répondre « connexion perdue ».
+  if (argc > 2) {
+    pgs_conn *idle;
+    rc = pgs_connect("127.0.0.1:4446", "PHOTOS", NULL, "test", "test", 1, &idle, err, sizeof(err));
+    int before = rc == PGS_OK ? pgs_alive(idle) : -1;
+    kill((pid_t)atoi(argv[2]), SIGTERM);
+    usleep(800 * 1000);
+    int after = rc == PGS_OK ? pgs_alive(idle) : -1;
+    int64_t sz = 0;
+    int op = rc == PGS_OK ? pgs_stat(idle, "Tel", &sz, err, sizeof(err)) : -1;
+    printf("connexion fermée par le PC : vivante avant=%d, après=%d, appel=%s\n", before, after,
+           op == PGS_CONNECTION ? "CONNECTION, ok" : "AUTRE");
+    if (rc == PGS_OK) pgs_close(idle);
+  }
+
+  // Chiffrement exigé face à un PC en SMB 2 : refus, pas de repli silencieux.
+  {
+    pgs_conn *x = NULL;
+    rc = pgs_connect2(SERVER, "PHOTOS", NULL, "test", "test", PGS_SEAL_MUST, NULL, NULL, 0, &x, err, sizeof(err));
+    printf("chiffrement exigé sur un PC en SMB 2 : %s\n", rc == PGS_NOT_ENCRYPTED ? "refusé (NOT_ENCRYPTED), ok" : "ACCEPTÉ");
+    if (x) pgs_close(x);
+    // Nom du PC lu dans le défi NTLM, avant de répondre : bon nom, puis un autre.
+    char seen[64] = "";
+    rc = pgs_connect2(SERVER, "PHOTOS", NULL, "test", "test", PGS_SEAL_IF_POSSIBLE, NULL, seen, sizeof(seen), &x, err, sizeof(err));
+    if (x) pgs_close(x);
+    x = NULL;
+    char again[64] = "";
+    int good = pgs_connect2(SERVER, "PHOTOS", NULL, "test", "test", PGS_SEAL_IF_POSSIBLE, seen, again, sizeof(again), &x, err, sizeof(err));
+    if (x) pgs_close(x);
+    x = NULL;
+    int bad = pgs_connect2(SERVER, "PHOTOS", NULL, "test", "test", PGS_SEAL_IF_POSSIBLE, "AUTRE-PC", NULL, 0, &x, err, sizeof(err));
+    if (x) pgs_close(x);
+    printf("nom annoncé=%s, même nom : %s, autre nom : %s\n", seen, good == PGS_OK ? "accepté" : "REFUSÉ",
+           bad == PGS_PC_CHANGED ? "refusé avant la réponse NTLM (PC_CHANGED)" : "ACCEPTÉ");
+  }
+
   pgs_conn *c;
   rc = pgs_connect(SERVER, "PHOTOS", NULL, "test", "test", 1, &c, err, sizeof(err));
   if (rc != PGS_OK) {
@@ -279,11 +318,30 @@ int main(int argc, char **argv) {
   uint8_t *third = malloc((size_t)blen);
   memcpy(third, other, (size_t)blen);
   long long cut = disk_size("Tel/2026 Novembre/VID_3.mp4.part");
-  third[cut - 1000] ^= 1; // dans les 64 derniers Ko écrits : le contrôle doit le voir
+  // juste avant le point de reprise (fin - DEPTH × CHUNK), dans les 64 Ko contrôlés
+  third[cut - (long long)PGS_DEPTH * PGS_CHUNK - 1000] ^= 1;
   s = source(&m, third, blen);
   rc = pgs_upload(c, &s, "Tel/2026 Novembre/VID_3.mp4", blen, 1, 1, &sent, err, sizeof(err));
-  printf("fin du .part différente : reparti de %lld (rc=%d), identique=%d\n", (long long)m.first, rc,
+  printf("avant le point de reprise différent : reparti de %lld (rc=%d), identique=%d\n", (long long)m.first, rc,
          same_on_disk("Tel/2026 Novembre/VID_3.mp4", third, blen));
+
+  // Un .part avec un trou avant la fin (écritures en vol perdues à la coupure) : on reprend
+  // 4 Mo plus tôt, donc le trou est réécrit.
+  {
+    const char *hole_path = "Tel/2026 Novembre/VID_5.mp4";
+    char *hp = disk_path("Tel/2026 Novembre/VID_5.mp4.part");
+    FILE *hf = fopen(hp, "wb");
+    uint8_t *holed = malloc(12 << 20);
+    memcpy(holed, big, 12 << 20);
+    memset(holed + (10 << 20), 0, 1 << 20);
+    fwrite(holed, 1, 12 << 20, hf);
+    fclose(hf);
+    free(holed);
+    s = source(&m, big, blen);
+    rc = pgs_upload(c, &s, hole_path, blen, 1, 1, &sent, err, sizeof(err));
+    printf("trou avant la fin : repris à %lld Mo (rc=%d), identique=%d\n", (long long)(m.first / 1048576), rc,
+           same_on_disk(hole_path, big, blen));
+  }
 
   // Un petit fichier coupé ne laisse pas de .part (moins de 8 Mo : on recommence).
   s = source(&m, data, len);

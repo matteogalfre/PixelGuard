@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <time.h>
 
 #include "smb2.h"
@@ -58,6 +59,8 @@ static int not_found(uint32_t st) {
 }
 
 /** Traduit l'échec d'un appel : coupure réseau (on ferme) ou refus du PC (statut NT). */
+#define PGS_STATUS_NETWORK_SESSION_EXPIRED 0xC000035C
+
 static int fail(pgs_conn *c, int rc, char *err, size_t errlen) {
   struct smb2_context *smb2 = c->smb2;
   if (smb2 == NULL || c->dead) {
@@ -65,8 +68,10 @@ static int fail(pgs_conn *c, int rc, char *err, size_t errlen) {
     return PGS_CONNECTION;
   }
   uint32_t st = (uint32_t)smb2_get_nterror(smb2);
+  // Session fermée par le PC (inactivité, redémarrage du service) : c'est une coupure aussi.
   if (!sock_ok(smb2) || rc == -ETIMEDOUT || rc == -ECONNRESET || rc == -EPIPE || rc == -ENOTCONN ||
-      st == SMB2_STATUS_SHUTDOWN || st == SMB2_STATUS_CANCELLED) {
+      st == SMB2_STATUS_SHUTDOWN || st == SMB2_STATUS_CANCELLED || st == SMB2_STATUS_USER_SESSION_DELETED ||
+      st == SMB2_STATUS_NETWORK_NAME_DELETED || st == PGS_STATUS_NETWORK_SESSION_EXPIRED) {
     seterr(err, errlen, "Connexion au PC perdue (%s)", smb2_get_error(smb2));
     kill_conn(c);
     return PGS_CONNECTION;
@@ -111,13 +116,21 @@ static void ignore_sigpipe(void) { signal(SIGPIPE, SIG_IGN); }
 
 int pgs_connect(const char *server, const char *share, const char *domain, const char *user,
                 const char *password, int encrypt, pgs_conn **out, char *err, size_t errlen) {
+  return pgs_connect2(server, share, domain, user, password, encrypt ? PGS_SEAL_IF_POSSIBLE : PGS_SEAL_NO, NULL,
+                      NULL, 0, out, err, errlen);
+}
+
+int pgs_connect2(const char *server, const char *share, const char *domain, const char *user,
+                 const char *password, int want_seal, const char *expected_name, char *seen, size_t seenlen,
+                 pgs_conn **out, char *err, size_t errlen) {
   static pthread_once_t once = PTHREAD_ONCE_INIT;
   pthread_once(&once, ignore_sigpipe);
   *out = NULL;
+  if (seen != NULL && seenlen > 0) seen[0] = 0;
   int guest = user == NULL || *user == 0;
   for (int attempt = 0; attempt < 2; attempt++) {
-    int seal = encrypt && attempt == 0;
-    if (attempt == 1 && !encrypt) break;
+    int seal = want_seal != PGS_SEAL_NO && attempt == 0;
+    if (attempt == 1 && want_seal != PGS_SEAL_IF_POSSIBLE) break;
     struct smb2_context *smb2 = smb2_init_context();
     if (smb2 == NULL) {
       seterr(err, errlen, "Mémoire insuffisante");
@@ -133,7 +146,18 @@ int pgs_connect(const char *server, const char *share, const char *domain, const
     // Signature exigée (Windows 11 l'exige aussi) ; un invité n'a pas de clé pour signer.
     smb2_set_sign(smb2, guest ? 0 : 1);
     smb2_set_seal(smb2, seal);
+    smb2_pg_set_expected_server_name(smb2, expected_name);
     int rc = smb2_connect_share(smb2, server, share, NULL);
+    if (seen != NULL && seenlen > 0 && smb2_pg_get_server_name(smb2)[0]) {
+      snprintf(seen, seenlen, "%s", smb2_pg_get_server_name(smb2));
+    }
+    if (rc == 0 && want_seal == PGS_SEAL_MUST && !smb2->seal) {
+      // Jamais de repli silencieux : chiffrement demandé, chiffrement ou rien.
+      smb2_disconnect_share(smb2);
+      smb2_destroy_context(smb2);
+      seterr(err, errlen, "Ce PC n'a pas accepté le chiffrement");
+      return PGS_NOT_ENCRYPTED;
+    }
     if (rc == 0) {
       pgs_conn *c = calloc(1, sizeof(*c));
       if (c == NULL) {
@@ -149,6 +173,16 @@ int pgs_connect(const char *server, const char *share, const char *domain, const
     uint32_t st = (uint32_t)smb2_get_nterror(smb2);
     uint16_t dialect = smb2_get_dialect(smb2);
     int code;
+    if (smb2_pg_name_mismatch(smb2)) {
+      seterr(err, errlen, "%s", smb2_pg_get_server_name(smb2));
+      smb2_destroy_context(smb2);
+      return PGS_PC_CHANGED;
+    }
+    if (seal && want_seal == PGS_SEAL_MUST && (strstr(msg, "ncryption") != NULL || (dialect != 0 && dialect < SMB2_VERSION_0300))) {
+      seterr(err, errlen, "%s", msg);
+      smb2_destroy_context(smb2);
+      return PGS_NOT_ENCRYPTED;
+    }
     if (strstr(msg, "Session setup failed") != NULL || st == SMB2_STATUS_LOGON_FAILURE ||
         st == SMB2_STATUS_ACCOUNT_DISABLED || st == SMB2_STATUS_ACCOUNT_RESTRICTION ||
         st == SMB2_STATUS_PASSWORD_EXPIRED || st == SMB2_STATUS_ACCOUNT_LOCKED_OUT) {
@@ -162,8 +196,9 @@ int pgs_connect(const char *server, const char *share, const char *domain, const
     }
     seterr(err, errlen, "%s", msg);
     smb2_destroy_context(smb2);
-    // Chiffrement impossible (SMB 2 seulement, ou refusé) : on refait sans, signé, et on le dira.
-    if (seal && code != PGS_AUTH && code != PGS_UNREACHABLE) continue;
+    // Appairage : chiffrement impossible (SMB 2 seulement, ou refusé), on refait sans, signé, et
+    // l'écran le dit. Ailleurs (PGS_SEAL_MUST), la boucle s'arrête là.
+    if (seal && want_seal == PGS_SEAL_IF_POSSIBLE && code != PGS_AUTH && code != PGS_UNREACHABLE) continue;
     return code;
   }
   return PGS_SMB;
@@ -178,7 +213,36 @@ void pgs_close(pgs_conn *c) {
   free(c);
 }
 
-int pgs_alive(pgs_conn *c) { return c != NULL && !c->dead && sock_ok(c->smb2); }
+/**
+ * Le PC ferme une session restée sans rien faire (15 min sous Windows) : le socket est alors
+ * fermé de son côté, mais on ne le voit qu'en le regardant. Une connexion au repos ne doit rien
+ * avoir à lire : si le socket dit « fin » ou « erreur », elle est morte.
+ */
+static int peer_closed(struct smb2_context *smb2) {
+  int fd = smb2_get_fd(smb2);
+  if (fd < 0) return 1;
+  struct pollfd p = {.fd = fd, .events = POLLIN};
+  int n = poll(&p, 1, 0);
+  if (n < 0) return errno != EINTR;
+  if (n == 0) return 0;
+  if (p.revents & (POLLERR | POLLHUP | POLLNVAL)) return 1;
+  if (p.revents & POLLIN) {
+    char b;
+    ssize_t r = recv(fd, &b, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (r == 0) return 1;
+    if (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) return 1;
+  }
+  return 0;
+}
+
+int pgs_alive(pgs_conn *c) {
+  if (c == NULL || c->dead || !sock_ok(c->smb2)) return 0;
+  if (peer_closed(c->smb2)) {
+    kill_conn(c);
+    return 0;
+  }
+  return 1;
+}
 
 void pgs_get_info(pgs_conn *c, pgs_info *info) {
   memset(info, 0, sizeof(*info));
@@ -380,24 +444,30 @@ static int pread_full(pgs_conn *c, struct smb2fh *fh, uint8_t *buf, uint32_t len
 #define RESUME_PROBE (64 * 1024)
 
 /**
- * Un « .part » laissé par un envoi coupé : on reprend s'il est assez gros et si ses derniers
- * 64 Ko sont identiques au même endroit de l'original. Renvoie l'octet où reprendre (0 sinon),
- * la source restant positionnée dessus. <0 si l'original ne se lit pas.
+ * Un « .part » laissé par un envoi coupé. Les DEPTH dernières écritures étaient peut-être encore
+ * en route quand il a été coupé : le PC a pu en appliquer une plus loin sans la précédente, et
+ * laisser un trou de zéros. Tout ce qui précède `fin - DEPTH × CHUNK` a en revanche été confirmé.
+ * On reprend donc à ce point-là, si les 64 Ko juste avant sont identiques au même endroit de
+ * l'original. Renvoie l'octet où reprendre (0 sinon), la source restant positionnée dessus.
+ * <0 si l'original ne se lit pas.
  */
 static int64_t resume_offset(pgs_conn *c, struct smb2fh *fh, pgs_source *src, int64_t existing,
                              int64_t expected, uint8_t *scratch, uint32_t max_read) {
   if (existing < PGS_RESUME_MIN || expected <= existing) return 0;
+  int64_t start = existing - (int64_t)PGS_DEPTH * PGS_CHUNK;
+  int probe = start < RESUME_PROBE ? (int)start : RESUME_PROBE;
+  if (start <= 0 || probe <= 0) return 0;
   uint8_t *remote = malloc(RESUME_PROBE);
   if (remote == NULL) return 0;
   int64_t result = 0;
-  int got = pread_full(c, fh, remote, RESUME_PROBE, (uint64_t)(existing - RESUME_PROBE), max_read);
-  if (got == RESUME_PROBE) {
-    if (skip_full(src, scratch, PGS_CHUNK, existing - RESUME_PROBE) < 0) {
+  int got = pread_full(c, fh, remote, (uint32_t)probe, (uint64_t)(start - probe), max_read);
+  if (got == probe) {
+    if (skip_full(src, scratch, PGS_CHUNK, start - probe) < 0) {
       result = -1;
     } else {
-      int n = read_full(src, scratch, RESUME_PROBE);
+      int n = read_full(src, scratch, probe);
       if (n < 0) result = -1;
-      else if (n == RESUME_PROBE && memcmp(remote, scratch, RESUME_PROBE) == 0) result = existing;
+      else if (n == probe && memcmp(remote, scratch, (size_t)probe) == 0) result = start;
     }
   }
   free(remote);
@@ -442,9 +512,17 @@ int pgs_upload(pgs_conn *c, pgs_source *src, const char *target, int64_t expecte
   }
 
   clear_status(c);
-  fh = smb2_open(c->smb2, part, keep ? (O_RDWR | O_CREAT) : (O_RDWR | O_CREAT | O_TRUNC));
+  // Ouvert en exclusif : si un autre téléphone envoie le même nom au même moment, le second est
+  // refusé au lieu de mélanger les deux fichiers.
+  fh = smb2_open(c->smb2, part,
+                 keep ? (O_RDWR | O_CREAT | SMB2_O_EXCLUSIVE_SHARE) : (O_RDWR | O_CREAT | O_TRUNC));
   if (fh == NULL) {
-    result = fail(c, -EIO, err, errlen);
+    if (c->smb2 != NULL && (uint32_t)smb2_get_nterror(c->smb2) == SMB2_STATUS_SHARING_VIOLATION) {
+      seterr(err, errlen, "Le PC garde ce fichier ouvert (autre appareil, ou envoi coupé à l'instant) : il repartira à la prochaine sauvegarde");
+      result = PGS_SMB;
+    } else {
+      result = fail(c, -EIO, err, errlen);
+    }
     goto out;
   }
   if (src->open(src->ctx) != 0) {
@@ -469,6 +547,8 @@ int pgs_upload(pgs_conn *c, pgs_source *src, const char *target, int64_t expecte
     result = PGS_TRANSFER;
     goto out;
   }
+  // En reprise, tout ce qui suit le point de reprise est réécrit (un éventuel trou disparaît)
+  // jusqu'au bout de l'original, plus long que le « .part » : rien à tronquer.
   if (start == 0 && existing > 0) {
     // Rien à reprendre : on repart d'un fichier vide, et d'une source relue du début.
     clear_status(c);

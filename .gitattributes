@@ -1,0 +1,2 @@
+# Le script Windows garde ses fins de ligne CRLF telles quelles (cmd.exe les préfère).
+tools/*.cmd -text

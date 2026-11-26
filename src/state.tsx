@@ -1,10 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { AppState } from 'react-native';
 
-import { stats, type Preview, type Stats } from './engine';
+import { onPcIdentified, stats, type Preview, type Stats } from './engine';
+import { forgetGallery, galleryAlbums } from './gallery';
 import type { Kinds, Period, Sorting } from './logic';
-import { Pg, type Album } from './native';
-import { readAccess, type Access } from './permissions';
+import type { Album } from './native';
+import { openSettings, readAccess, widenAccess, type Access } from './permissions';
 import {
   addRun,
   defaultPrefs,
@@ -14,10 +15,12 @@ import {
   loadPassword,
   loadPcs,
   loadPrefs,
+  loadWelcomeDone,
   saveAlbums,
   savePassword,
   savePcs,
   savePrefs,
+  saveWelcomeDone,
   type PcSettings,
   type Prefs,
   type Run,
@@ -25,8 +28,13 @@ import {
 
 type AppCtx = {
   ready: boolean;
+  /** Premier lancement terminé : sinon l'accueil ouvre les trois écrans de bienvenue. */
+  welcomeDone: boolean;
+  finishWelcome: () => Promise<void>;
   access: Access | 'unknown';
   requestAccess: () => Promise<void>;
+  /** Accès partiel : ouvre le choix des photos visibles. */
+  moreAccess: () => Promise<void>;
   /** Tous les PC enregistrés, et celui vers lequel on sauvegarde. */
   pcs: PcSettings[];
   pc: PcSettings;
@@ -65,6 +73,7 @@ export function useApp(): AppCtx {
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
+  const [welcomeDone, setWelcomeDone] = useState(true);
   const [access, setAccess] = useState<Access | 'unknown'>('unknown');
   const [pcs, setPcs] = useState<PcSettings[]>([]);
   const [activeId, setActiveId] = useState('');
@@ -81,7 +90,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     (async () => {
-      const [list, a, h, pr] = await Promise.all([loadPcs(), readAccess(false), loadHistory(), loadPrefs()]);
+      const [list, a, h, pr, seen] = await Promise.all([loadPcs(), readAccess(false), loadHistory(), loadPrefs(), loadWelcomeDone()]);
+      // Quelqu'un qui avait déjà un PC avant cette version n'a pas besoin de la bienvenue.
+      setWelcomeDone(seen || list.pcs.length > 0);
       setPrefs(pr);
       setPcs(list.pcs);
       setActiveId(list.activeId);
@@ -93,7 +104,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const loadAlbumsNow = useCallback(async () => {
-    const list = await Pg.listAlbums();
+    const list = await galleryAlbums();
     setAlbums(list);
     const saved = await loadAlbums();
     // Premier lancement : on coche l'appareil photo (la Pellicule sur iPhone).
@@ -113,6 +124,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (ready) refresh();
   }, [ready, refresh]);
 
+  // Un PC enregistré avant le contrôle du nom vient d'être identifié (déjà écrit sur le disque).
+  useEffect(() => {
+    onPcIdentified((id, identity) =>
+      setPcs((prev) => prev.map((p) => (p.id === id && !p.identity ? { ...p, identity } : p))),
+    );
+    return () => onPcIdentified(null);
+  }, []);
+
   // Une autre sélection, un autre PC : l'ancienne comparaison et les exclusions ne valent plus.
   useEffect(() => {
     setPreview(null);
@@ -123,6 +142,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const sub = AppState.addEventListener('change', async (state) => {
       if (state !== 'active') return;
+      // Photos prises ou sélection d'accès changée pendant ce temps : on relira la galerie.
+      forgetGallery();
       setAccess(await readAccess(false));
     });
     return () => sub.remove();
@@ -180,14 +201,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setHistory(await addRun(r));
   }, []);
 
-  const requestAccess = useCallback(async () => {
-    setAccess(await readAccess(true));
+  const finishWelcome = useCallback(async () => {
+    setWelcomeDone(true);
+    await saveWelcomeDone();
   }, []);
+
+  const requestAccess = useCallback(async () => {
+    forgetGallery();
+    // Refusé pour de bon : seul l'écran des réglages peut le rendre (relu au retour dans l'appli).
+    if (access === 'blocked') return openSettings();
+    setAccess(await readAccess(true));
+  }, [access]);
+
+  /** Accès partiel : choisir d'autres photos, puis relire la galerie. */
+  const moreAccess = useCallback(async () => {
+    await widenAccess();
+    forgetGallery();
+    setAccess(await readAccess(false));
+    refresh();
+  }, [refresh]);
 
   return (
     <Ctx.Provider
       value={{
-        ready, access, requestAccess,
+        ready, welcomeDone, finishWelcome, access, requestAccess, moreAccess,
         pcs, pc, password, savePc, removePc, setActivePc, passwordOf: loadPassword,
         albums, selected, setSelected,
         kinds: prefs.kinds,

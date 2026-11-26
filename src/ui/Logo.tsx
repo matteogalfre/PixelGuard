@@ -16,7 +16,8 @@ export function Logo({ size = 32 }: { size?: number }) {
   const box = 120;
   const start = (box - grid) / 2;
   return (
-    <Svg width={size} height={size} viewBox={`0 0 ${box} ${box}`}>
+    // Décoratif : le nom « PixelGuard » est toujours écrit à côté.
+    <Svg width={size} height={size} viewBox={`0 0 ${box} ${box}`} accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
       <Rect x={0} y={0} width={box} height={box} rx={28} fill="#7C6CFF" />
       {ARROW.flatMap((row, r) =>
         row.split('').map((c, col) => (

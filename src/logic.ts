@@ -306,3 +306,78 @@ export function pickShare(shares: string[]): string {
     shares[0]
   );
 }
+
+/** Une copie connue sur le PC : son chemin dans le partage et sa taille. */
+export type IndexEntry = { path: string; size: number };
+export type CopyIndex = Record<string, IndexEntry>;
+
+/**
+ * Un changement d'index : des entrées à poser, d'autres à retirer. On n'écrit plus l'index en
+ * entier depuis une copie qui a pu vieillir : chaque changement s'applique sur la dernière
+ * version enregistrée.
+ */
+export type IndexPatch = { set?: CopyIndex; del?: string[] };
+
+export function applyIndexPatch(index: CopyIndex, patch: IndexPatch): CopyIndex {
+  const out: CopyIndex = { ...index };
+  for (const id of patch.del ?? []) delete out[id];
+  Object.assign(out, patch.set ?? {});
+  return out;
+}
+
+/**
+ * Une coupure (Wi-Fi, PC qui a fermé une session restée inactive) : on retente une fois, après
+ * une courte pause. Le module natif rouvre une connexion neuve au premier appel suivant.
+ */
+export async function retryOnce<T>(op: () => Promise<T>, retriable: (e: unknown) => boolean, pauseMs = 800): Promise<T> {
+  try {
+    return await op();
+  } catch (e) {
+    if (!retriable(e)) throw e;
+    await new Promise((r) => setTimeout(r, pauseMs));
+    return op();
+  }
+}
+
+/**
+ * Débit typique des sauvegardes passées (médiane, en octets par seconde), pour estimer la durée
+ * d'une grosse sauvegarde. Seulement les vraies (au moins 50 Mo et 10 s), sinon `null`.
+ */
+export function typicalRate(runs: { bytes: number; seconds: number }[]): number | null {
+  const rates = runs
+    .filter((r) => r.bytes >= 50e6 && r.seconds >= 10)
+    .map((r) => r.bytes / r.seconds)
+    .sort((a, b) => a - b);
+  return rates.length ? rates[Math.floor(rates.length / 2)] : null;
+}
+
+/** Ce que contient le QR affiché par le PC préparé (tools/PixelGuard-PC.cmd). */
+export type Pairing = { host: string; name: string; share: string; user: string; password: string; folder: string };
+
+/** Les champs du lien, déjà découpés (paramètres d'un lien ouvert par le système). */
+export function pairingFrom(q: Record<string, string | string[] | undefined>): Pairing | null {
+  const one = (k: string) => {
+    const v = q[k];
+    return (Array.isArray(v) ? v[0] : v) ?? '';
+  };
+  if (one('v') !== '1' || !one('h') || !one('s') || !one('u') || !one('p')) return null;
+  return { host: one('h'), name: one('n'), share: one('s'), user: one('u'), password: one('p'), folder: one('f') };
+}
+
+/** Le texte lu dans le QR : « pixelguard://pair?v=1&h=…&n=…&s=…&u=…&p=… ». null si ce n'en est pas un. */
+export function parsePairing(text: string): Pairing | null {
+  const m = /^pixelguard:\/\/pair\?(.*)$/i.exec(text.trim());
+  if (!m) return null;
+  const q: Record<string, string> = {};
+  for (const part of m[1].split('&')) {
+    const i = part.indexOf('=');
+    if (i <= 0) continue;
+    try {
+      q[part.slice(0, i)] = decodeURIComponent(part.slice(i + 1).replace(/\+/g, ' '));
+    } catch {
+      return null;
+    }
+  }
+  return pairingFrom(q);
+}
+

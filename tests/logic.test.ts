@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import {
+  addToFolder,
+  applyIndexPatch,
   decide,
   folderState,
+  parsePairing,
+  retryOnce,
+  typicalRate,
   joinPath,
   defaultSorting,
   folderFor,
@@ -165,3 +171,79 @@ test('période : derniers mois, année, de tel mois à tel mois', () => {
   assert.deepEqual(periodRange({ kind: 'range', from: 202603, to: 202511 }, now), [202511, 202603]);
   assert.equal(periodRange({ kind: 'all' }, now), null);
 });
+
+test("index : un changement s'applique sur la dernière version", () => {
+  const disk = { a: { path: 'x/a.jpg', size: 1 }, b: { path: 'x/b.jpg', size: 2 } };
+  // une autre comparaison a ajouté « c » entre-temps : la sauvegarde ne doit pas l'effacer
+  const later = applyIndexPatch(disk, { set: { c: { path: 'x/c.jpg', size: 3 } } });
+  const out = applyIndexPatch(later, { set: { d: { path: 'x/d.jpg', size: 4 } }, del: ['a'] });
+  assert.deepEqual(Object.keys(out).sort(), ['b', 'c', 'd']);
+  assert.equal(disk.a.size, 1, "l'original n'est pas modifié");
+});
+
+test('nom promis à un autre envoi : jamais repris, jamais pris pour « déjà là »', () => {
+  // sur le PC : IMG.jpg (autre contenu) ; IMG (1).jpg est promis à un envoi en cours
+  const f = folderState([{ name: 'IMG.jpg', size: 10 }]);
+  addToFolder(f, { name: 'img (1).jpg', size: -2 });
+  assert.deepEqual(decide('IMG.jpg', 20, f), { action: 'upload', remoteName: 'IMG (2).jpg' });
+});
+
+test('coupure : un seul nouvel essai, et seulement pour une coupure', async () => {
+  const lost = Object.assign(new Error('perdue'), { code: 'CONNECTION' });
+  const isLost = (e: unknown) => (e as { code?: string }).code === 'CONNECTION';
+  let calls = 0;
+  const flaky = async () => {
+    if (++calls === 1) throw lost;
+    return 'ok';
+  };
+  assert.equal(await retryOnce(flaky, isLost, 0), 'ok');
+  assert.equal(calls, 2);
+
+  calls = 0;
+  const dead = async () => {
+    calls++;
+    throw lost;
+  };
+  await assert.rejects(retryOnce(dead, isLost, 0), /perdue/);
+  assert.equal(calls, 2, 'pas plus de deux essais');
+
+  calls = 0;
+  const refused = async () => {
+    calls++;
+    throw Object.assign(new Error('refus'), { code: 'SMB' });
+  };
+  await assert.rejects(retryOnce(refused, isLost, 0), /refus/);
+  assert.equal(calls, 1, 'un refus du PC ne se retente pas');
+});
+
+test('débit typique : la médiane des vraies sauvegardes, rien sans historique', () => {
+  assert.equal(typicalRate([]), null);
+  assert.equal(typicalRate([{ bytes: 10e6, seconds: 1 }]), null, 'trop petite pour compter');
+  const runs = [
+    { bytes: 600e6, seconds: 20 }, // 30 Mo/s
+    { bytes: 400e6, seconds: 40 }, // 10 Mo/s
+    { bytes: 1000e6, seconds: 20 }, // 50 Mo/s
+    { bytes: 5e6, seconds: 30 }, // ignorée
+  ];
+  assert.equal(typicalRate(runs), 30e6);
+});
+
+test('QR du PC : lien lu, et refus de tout le reste', () => {
+  const link = 'pixelguard://pair?v=1&h=192.168.1.20&n=DESKTOP-AB12CD&s=PixelGuard&u=pixelguard&p=k7mq-x2p9-dh4t-r8zn';
+  assert.deepEqual(parsePairing(link), {
+    host: '192.168.1.20', name: 'DESKTOP-AB12CD', share: 'PixelGuard', user: 'pixelguard', password: 'k7mq-x2p9-dh4t-r8zn', folder: '',
+  });
+  assert.equal(parsePairing('  ' + link + '\n')?.host, '192.168.1.20', 'espaces autour tolérés');
+  assert.equal(parsePairing('https://example.com/?h=1'), null);
+  assert.equal(parsePairing('pixelguard://pair?v=2&h=1&s=a&u=b&p=c'), null, 'version inconnue');
+  assert.equal(parsePairing('pixelguard://pair?v=1&h=1&s=a&u=b'), null, 'sans mot de passe');
+  assert.equal(parsePairing('pixelguard://pair?v=1&h=1&s=a&u=b&p=%E0'), null, 'encodage cassé');
+  assert.equal(parsePairing('pixelguard://pair?v=1&h=1&s=Mes%20photos&u=b&p=c')?.share, 'Mes photos');
+});
+
+test("le fichier donné par l'appli est bien tools/PixelGuard-PC.cmd (npm run embed-prep)", () => {
+  const embedded = readFileSync(new URL('../src/prepScript.ts', import.meta.url), 'utf8');
+  const script = readFileSync(new URL('../tools/PixelGuard-PC.cmd', import.meta.url), 'utf8');
+  assert.ok(embedded.includes(JSON.stringify(script)), 'relancer : npm run embed-prep');
+});
+

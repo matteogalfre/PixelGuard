@@ -14,11 +14,15 @@ done
 [ -d $W/venv ] || { python3 -m venv $W/venv && $W/venv/bin/pip install -q impacket; }
 $W/venv/bin/python $W/venv/bin/smbserver.py -smb2support -port 4445 -ip 127.0.0.1 -username test -password test PHOTOS $W/share >/dev/null 2>&1 &
 SERVER=$!
-trap 'kill $SERVER' EXIT
-i=0; until nc -z 127.0.0.1 4445 2>/dev/null || [ $i -ge 40 ]; do sleep 0.5; i=$((i+1)); done
+# Un second serveur, que le test coupe pour vérifier qu'une connexion fermée par le PC se voit.
+$W/venv/bin/python $W/venv/bin/smbserver.py -smb2support -port 4446 -ip 127.0.0.1 -username test -password test PHOTOS $W/share >/dev/null 2>&1 &
+SERVER2=$!
+trap 'kill $SERVER $SERVER2 2>/dev/null' EXIT
+i=0; until { nc -z 127.0.0.1 4445 && nc -z 127.0.0.1 4446; } 2>/dev/null || [ $i -ge 40 ]; do sleep 0.5; i=$((i+1)); done
 rm -rf "$W/share/Tel"
 CP=$(ls $W/jars/*.jar | tr '\n' ':')
 SRC=../android/src/main/java/expo/modules/pgnative
-"${JAVA_HOME:+$JAVA_HOME/bin/}javac" -d $W/out -cp "$CP" $SRC/SmbCore.java $SRC/HybridSecurityProvider.java CoreTest.java NbParse.java
-"${JAVA_HOME:+$JAVA_HOME/bin/}java" -cp "$CP$W/out" CoreTest "$W/share" 2>&1 | grep -v SLF4J
+"${JAVA_HOME:+$JAVA_HOME/bin/}javac" -d $W/out -cp "$CP" $SRC/SmbCore.java $SRC/HybridSecurityProvider.java $SRC/MiniServer.java CoreTest.java NbParse.java HttpTest.java
+"${JAVA_HOME:+$JAVA_HOME/bin/}java" -cp "$CP$W/out" CoreTest "$W/share" $SERVER2 2>&1 | grep -v SLF4J
 "${JAVA_HOME:+$JAVA_HOME/bin/}java" -cp "$CP$W/out" NbParse
+"${JAVA_HOME:+$JAVA_HOME/bin/}java" -cp "$CP$W/out" HttpTest ../../../tools/PixelGuard-PC.cmd

@@ -1,4 +1,4 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
   <!-- Sauvegarde écran éteint : service de premier plan avec sa notification. -->
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
@@ -9,5 +9,10 @@
       android:name="expo.modules.pgnative.TransferService"
       android:exported="false"
       android:foregroundServiceType="dataSync" />
+    <!-- Le lecteur de QR suit l'orientation du téléphone (paysage par défaut). -->
+    <activity
+      android:name="com.journeyapps.barcodescanner.CaptureActivity"
+      android:screenOrientation="fullSensor"
+      tools:replace="screenOrientation" />
   </application>
 </manifest>

@@ -6,6 +6,8 @@ struct SmbTarget: Equatable {
   var user: String
   var password: String
   var encrypt: Bool
+  /** Nom NetBIOS du PC appairé : un PC qui s'annonce autrement ne reçoit rien. "" : pas encore connu. */
+  var identity: String
 }
 
 /** Tampon d'erreur pour les fonctions C. */
@@ -102,6 +104,7 @@ final class SmbPool {
   private var open = 0
   private var generation = 0
   private var lastInfo = pgs_info()
+  private var lastIdentity = ""
 
   func info() -> pgs_info {
     cond.lock()
@@ -143,29 +146,41 @@ final class SmbPool {
     case Int(PGS_TRANSFER): return PgError("TRANSFER", msg.isEmpty ? "Erreur de transfert" : msg)
     case Int(PGS_EXISTS): return PgError("EXISTS", "Déjà sur le PC sous ce nom")
     case Int(PGS_CANCELLED): return PgError("CANCELLED", "Arrêté")
+    case Int(PGS_NOT_ENCRYPTED):
+      return PgError("NOT_ENCRYPTED", "Ce PC n'a pas accepté le chiffrement : rien n'a été envoyé. Chez toi, tu peux couper le chiffrement dans les réglages de ce PC.")
+    case Int(PGS_PC_CHANGED):
+      return PgError("PC_CHANGED", "Ce n'est pas le PC appairé (il s'annonce comme « \(msg) ») : ni ton mot de passe ni tes photos ne sont partis. Si tu as renommé ton PC, refais l'appairage.")
     default: return PgError("SMB", msg.isEmpty ? "Le PC refuse" : msg)
     }
   }
 
-  private static func openConn(_ server: String, _ t: SmbTarget, share: String) throws -> (OpaquePointer, pgs_info) {
+  /**
+   * `strict` (tout sauf l'appairage) : chiffrement exigé s'il est demandé, et le PC doit annoncer
+   * le nom retenu à l'appairage avant de recevoir l'utilisateur et la réponse au mot de passe.
+   */
+  private static func openConn(_ server: String, _ t: SmbTarget, share: String, strict: Bool) throws -> (OpaquePointer, pgs_info, String) {
     let (domain, user) = splitUser(t.user)
     var conn: OpaquePointer?
     let err = CErr()
-    let rc = code(pgs_connect(server, share, domain, user, t.password, t.encrypt ? 1 : 0, &conn, err.p, CErr.size))
+    let seen = CErr()
+    let seal = !t.encrypt ? Int32(PGS_SEAL_NO) : strict ? Int32(PGS_SEAL_MUST) : Int32(PGS_SEAL_IF_POSSIBLE)
+    let expected = strict ? t.identity : ""
+    let rc = code(pgs_connect2(server, share, domain, user, t.password, seal, expected, seen.p, CErr.size, &conn, err.p, CErr.size))
     guard rc == Int(PGS_OK), let c = conn else {
       throw error(rc, err, host: Net.cleanHost(t.host).0, share: share)
     }
     var info = pgs_info()
     pgs_get_info(c, &info)
-    return (c, info)
+    return (c, info, seen.text)
   }
 
-  private static func describe(_ info: pgs_info, shares: Any) -> [String: Any] {
+  private static func describe(_ info: pgs_info, shares: Any, identity: String) -> [String: Any] {
     [
       "dialect": info.dialect == 0 ? "" : String(cString: pgs_dialect_name(info.dialect)),
       "signed": info.sign != 0,
       "encrypted": info.seal != 0,
       "shares": shares,
+      "identity": identity.isEmpty ? (NSNull() as Any) : (identity as Any),
     ]
   }
 
@@ -174,7 +189,7 @@ final class SmbPool {
     closeAll()
     let server = try Self.serverAddress(t.host)
     do {
-      let (c, info) = try Self.openConn(server, t, share: "IPC$")
+      let (c, info, seen) = try Self.openConn(server, t, share: "IPC$", strict: false)
       defer { pgs_close(c) }
       let box = NamesBox()
       let err = CErr()
@@ -183,10 +198,10 @@ final class SmbPool {
           Unmanaged<NamesBox>.fromOpaque(ctx!).takeUnretainedValue().names.append(String(cString: name!))
         }, Unmanaged.passUnretained(box).toOpaque(), err.p, CErr.size))
       }
-      return Self.describe(info, shares: rc == Int(PGS_OK) ? box.names : NSNull())
+      return Self.describe(info, shares: rc == Int(PGS_OK) ? box.names : NSNull(), identity: seen)
     } catch let e as PgError where e.code == "SHARE" {
       // Compte accepté mais IPC$ refusé : on tapera le nom du partage à la main.
-      return ["dialect": "", "signed": true, "encrypted": false, "shares": NSNull()]
+      return ["dialect": "", "signed": true, "encrypted": false, "shares": NSNull(), "identity": NSNull()]
     }
   }
 
@@ -194,21 +209,23 @@ final class SmbPool {
     cond.lock()
     if target == t && (open > idle.count || idle.contains(where: { pgs_alive($0) != 0 })) {
       let info = lastInfo
+      let identity = lastIdentity
       cond.unlock()
-      return Self.describe(info, shares: NSNull())
+      return Self.describe(info, shares: NSNull(), identity: identity)
     }
     cond.unlock()
     closeAll()
     let server = try Self.serverAddress(t.host)
-    let (c, info) = try Self.openConn(server, t, share: t.share.trimmingCharacters(in: CharacterSet(charactersIn: "\\/ ")))
+    let (c, info, seen) = try Self.openConn(server, t, share: t.share.trimmingCharacters(in: CharacterSet(charactersIn: "\\/ ")), strict: true)
     cond.lock()
     target = t
     self.server = server
     idle.append(c)
     open = 1
     lastInfo = info
+    lastIdentity = seen
     cond.unlock()
-    return Self.describe(info, shares: NSNull())
+    return Self.describe(info, shares: NSNull(), identity: seen)
   }
 
   func closeAll() {
@@ -245,10 +262,14 @@ final class SmbPool {
         open += 1
         let g = generation
         let server = self.server
+        let pinned = lastIdentity
         cond.unlock()
         do {
           // Wi-Fi coupé entre deux envois : on rouvre une connexion.
-          let (c, info) = try Self.openConn(server, t, share: t.share.trimmingCharacters(in: CharacterSet(charactersIn: "\\/ ")))
+          // Si le PC n'était pas encore identifié, le nom vu à la première connexion fait foi.
+          var known = t
+          if known.identity.isEmpty { known.identity = pinned }
+          let (c, info, _) = try Self.openConn(server, known, share: known.share.trimmingCharacters(in: CharacterSet(charactersIn: "\\/ ")), strict: true)
           cond.lock()
           if g == generation { lastInfo = info }
           cond.unlock()

@@ -871,6 +871,21 @@ const char *smb2_get_server_guid(struct smb2_context *smb2)
         return smb2->server_guid;
 }
 
+void smb2_pg_set_expected_server_name(struct smb2_context *smb2, const char *name)
+{
+        snprintf(smb2->pg_expected_name, sizeof(smb2->pg_expected_name), "%s", name ? name : "");
+}
+
+const char *smb2_pg_get_server_name(struct smb2_context *smb2)
+{
+        return smb2->pg_server_name;
+}
+
+int smb2_pg_name_mismatch(struct smb2_context *smb2)
+{
+        return smb2->pg_name_mismatch;
+}
+
 int smb2_get_application_key(struct smb2_context *smb2, uint8_t key[16])
 {
         if (smb2->session_key == NULL || smb2->session_key_size == 0) {

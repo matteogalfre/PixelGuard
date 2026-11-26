@@ -1,4 +1,3 @@
-import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
@@ -8,7 +7,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { lang, t } from '../i18n';
 import { humanBytes } from '../logic';
 import { useApp } from '../state';
-import { C, F, GRADIENT, Header, MainButton, t as ty, tap, Thumb } from '../ui/kit';
+import { Icon, C, F, GRADIENT, Header, MainButton, t as ty, tap, Thumb } from '../ui/kit';
 
 const COLUMNS = 4;
 const GAP = 4;
@@ -44,7 +43,8 @@ export default function Review() {
     <Pressable
       key={label}
       onPress={onPress}
-      style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 16, borderWidth: 1, borderColor: C.line, backgroundColor: C.surface }}
+      accessibilityRole="button"
+      style={{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 16, borderWidth: 1, borderColor: C.line, backgroundColor: C.surface }}
     >
       <Text style={{ color: C.text, fontFamily: F.semi, fontSize: 13 }}>{label}</Text>
     </Pressable>
@@ -53,7 +53,7 @@ export default function Review() {
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
       <LinearGradient
-        colors={['rgba(124,108,255,0.22)', 'rgba(176,108,255,0.07)', 'transparent']}
+        colors={[C.glow1, C.glow2, 'transparent']}
         start={{ x: 0.1, y: 0 }}
         end={{ x: 0.9, y: 0.55 }}
         style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 }}
@@ -78,15 +78,21 @@ export default function Review() {
         renderItem={({ item }) => {
           const on = !excluded.has(item.id);
           return (
-            <Pressable onPress={() => toggle(item.id)} style={{ width: cell, height: cell }}>
+            <Pressable
+              onPress={() => toggle(item.id)}
+              accessibilityRole="checkbox"
+              accessibilityState={{ checked: on }}
+              accessibilityLabel={item.name}
+              style={{ width: cell, height: cell }}
+            >
               <Thumb uri={item.uri} size={cell} radius={8} style={{ opacity: on ? 1 : 0.3 }} />
               {item.video ? (
-                <MaterialCommunityIcons name="play-circle" size={20} color="#fff" style={{ position: 'absolute', left: 5, bottom: 5 }} />
+                <Icon name="play-circle" size={20} color="#fff" style={{ position: 'absolute', left: 5, bottom: 5 }} />
               ) : null}
               <View style={{ position: 'absolute', top: 5, right: 5 }}>
                 {on ? (
                   <LinearGradient colors={GRADIENT} style={{ width: 22, height: 22, borderRadius: 11, alignItems: 'center', justifyContent: 'center' }}>
-                    <MaterialCommunityIcons name="check" size={15} color="#fff" />
+                    <Icon name="check" size={15} color="#fff" />
                   </LinearGradient>
                 ) : (
                   <View style={{ width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: 'rgba(255,255,255,0.8)' }} />
@@ -99,7 +105,7 @@ export default function Review() {
       <View
         style={{
           position: 'absolute', left: 0, right: 0, bottom: 0, padding: 20, paddingBottom: insets.bottom + 16, gap: 10,
-          backgroundColor: 'rgba(7,6,15,0.94)', borderTopWidth: 1, borderTopColor: C.line,
+          backgroundColor: C.bar, borderTopWidth: 1, borderTopColor: C.line,
         }}
       >
         <Text style={[ty.small, { textAlign: 'center' }]}>{t.reviewCount(kept.length, missing.length, humanBytes(keptBytes, lang))}</Text>
