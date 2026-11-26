@@ -11,7 +11,7 @@ import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.provider.MediaStore
-import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanIntentResult
 import com.journeyapps.barcodescanner.ScanOptions
 import com.hierynomus.msdtyp.AccessMask
 import com.hierynomus.mserref.NtStatus
@@ -254,12 +254,13 @@ class PgNativeModule : Module() {
         .setPrompt(prompt)
         .setBeepEnabled(false)
         .setOrientationLocked(false)
-      activity.startActivityForResult(ScanContract().createIntent(activity, options), SCAN_REQUEST)
+      // Sans ScanContract : il dépend d'androidx.activity, absent de la compilation du module.
+      activity.startActivityForResult(options.createScanIntent(activity), SCAN_REQUEST)
     }.runOnQueue(Queues.MAIN)
 
     OnActivityResult { _, payload ->
       if (payload.requestCode == SCAN_REQUEST) {
-        pendingScan?.resolve(ScanContract().parseResult(payload.resultCode, payload.data).contents)
+        pendingScan?.resolve(ScanIntentResult.parseActivityResult(payload.resultCode, payload.data).contents)
         pendingScan = null
       }
       if (payload.requestCode == REMOVE_REQUEST) {
