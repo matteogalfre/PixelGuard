@@ -3,20 +3,20 @@
   <h1>PixelGuard for Android and iPhone</h1>
   <p>Back up your phone's photos and videos to your PC over Wi-Fi. No cable, no cloud, no account.</p>
 
-  <img alt="License" src="https://img.shields.io/github/license/matteogalfre/PixelGuard-mobile?color=7c6cff&style=flat-square">
-  <img alt="Last commit" src="https://img.shields.io/github/last-commit/matteogalfre/PixelGuard-mobile?color=7c6cff&style=flat-square">
+  <img alt="License" src="https://img.shields.io/github/license/matteogalfre/PixelGuard?color=7c6cff&style=flat-square">
+  <img alt="Last commit" src="https://img.shields.io/github/last-commit/matteogalfre/PixelGuard?color=7c6cff&style=flat-square">
   <img alt="Android" src="https://img.shields.io/badge/platform-Android%2011+-7c6cff?style=flat-square">
   <img alt="iPhone" src="https://img.shields.io/badge/platform-iOS%2016.4+-7c6cff?style=flat-square">
 </div>
 
-The phone app of [PixelGuard](https://github.com/matteogalfre/PixelGuard). The desktop app pulls photos from the phone over ADB; this one does it the other way around: the phone sends them to a shared folder on your PC, and nothing needs to be installed on the PC.
+PixelGuard used to be a Windows app that pulled photos from the phone over a USB cable (ADB). It's now [archived](https://github.com/matteogalfre/PixelGuard-old), and this phone app replaces it: the phone sends your photos to a shared folder on your PC, over Wi-Fi, and nothing needs to be installed on the PC. It uses the same folders: with the by-month sorting, what the old app copied isn't copied again.
 
 ## Download
 
-[<img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" alt="Get it on Obtainium" height="60">](https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/matteogalfre/PixelGuard-mobile)
-[<img src="https://raw.githubusercontent.com/Kunzisoft/Github-badge/main/get-it-on-github.png" alt="Get it on GitHub" height="60">](https://github.com/matteogalfre/PixelGuard-mobile/releases/latest)
+[<img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" alt="Get it on Obtainium" height="60">](https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/matteogalfre/PixelGuard)
+[<img src="https://raw.githubusercontent.com/Kunzisoft/Github-badge/main/get-it-on-github.png" alt="Get it on GitHub" height="60">](https://github.com/matteogalfre/PixelGuard/releases/latest)
 
-Obtainium keeps the app up to date straight from this repository's releases. Android 11 or newer.
+Obtainium keeps the app up to date straight from this repository's releases. Android 11 or newer. On iPhone, see [below](#iphone).
 
 > Early version: feedback is very welcome, especially with a Windows PC.
 
@@ -125,7 +125,7 @@ Send `build/PixelGuard.ipa` to the iPhone (AirDrop, Files), then open SideStore,
 
 ## Feedback and contributions
 
-***All contributions are very welcome!*** Bug reports and ideas go [here](https://github.com/matteogalfre/PixelGuard-mobile/issues), pull requests are welcome.
+***All contributions are very welcome!*** Bug reports and ideas go [here](https://github.com/matteogalfre/PixelGuard/issues), pull requests are welcome.
 
 ## Credits
 
