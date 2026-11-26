@@ -369,8 +369,9 @@ export default function Home() {
       <MainButton
         label={!configured ? t.noPc : cmp ? (toSend.length ? t.backupN(toSend.length) : t.checkAgain) : t.backup}
         icon={!configured ? 'monitor' : 'cloud-upload'}
-        onPress={configured && cmp && cmp.missing.length === 0 ? () => app.setPreview(null) : backup}
-        disabled={configured && (chosen.length === 0 || (!!cmp && cmp.missing.length > 0 && toSend.length === 0))}
+        // Rien à envoyer (tout est là, ou tout a été retiré de l'envoi) : le bouton recompare.
+        onPress={configured && cmp && toSend.length === 0 ? () => app.setPreview(null) : backup}
+        disabled={configured && chosen.length === 0}
       />
 
       {configured ? (

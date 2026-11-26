@@ -80,6 +80,10 @@
     ],
     "backgroundColor": "#0b1117",
     "scheme": "pixelguard",
+    "locales": {
+      "en": "./locales/en.json",
+      "fr": "./locales/fr.json"
+    },
     "extra": {
       "router": {},
       "eas": {

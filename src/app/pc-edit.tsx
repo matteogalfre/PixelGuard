@@ -242,8 +242,8 @@ export default function PcEdit() {
       {skipPick ? (
         <Field label={t.manual} value={host} onChangeText={(v) => { setHost(v); setName(''); setInfo(null); setReady(false); }} placeholder={t.hostPh} />
       ) : null}
-      <Field label={t.user} value={user} onChangeText={(v) => { setUser(v); setInfo(null); setReady(false); }} placeholder={t.userPh} />
-      <Field label={t.password} value={password} onChangeText={(v) => { setPassword(v); setInfo(null); setReady(false); }} secureTextEntry hint={t.passwordHint} />
+      <Field label={os === 'mac' ? t.userMac : t.user} value={user} onChangeText={(v) => { setUser(v); setInfo(null); setReady(false); }} placeholder={os === 'mac' ? t.userMacPh : t.userPh} />
+      <Field label={os === 'mac' ? t.passwordMac : t.password} value={password} onChangeText={(v) => { setPassword(v); setInfo(null); setReady(false); }} secureTextEntry hint={os === 'mac' ? undefined : t.passwordHint} />
       <MainButton label={t.login} icon="login" kind="ghost" onPress={login} busy={busy === 'login'} disabled={!host || !user} />
     </View>
   );

@@ -2,6 +2,7 @@
   <img src="assets/icon.png" width="140" height="140" alt="PixelGuard icon">
   <h1>PixelGuard for Android and iPhone</h1>
   <p>Back up your phone's photos and videos to your PC over Wi-Fi. No cable, no cloud, no account.</p>
+  <p>A private alternative to cloud photo backup: your pictures go straight to a shared folder on your own Windows PC, Mac or NAS (SMB), and nowhere else.</p>
 
   <img alt="License" src="https://img.shields.io/github/license/matteogalfre/PixelGuard?color=7c6cff&style=flat-square">
   <img alt="Last commit" src="https://img.shields.io/github/last-commit/matteogalfre/PixelGuard?color=7c6cff&style=flat-square">
@@ -10,6 +11,13 @@
 </div>
 
 PixelGuard used to be a Windows app that pulled photos from the phone over a USB cable (ADB). It's now [archived](https://github.com/matteogalfre/PixelGuard-old), and this phone app replaces it: the phone sends your photos to a shared folder on your PC, over Wi-Fi, and nothing needs to be installed on the PC. It uses the same folders: with the by-month sorting, what the old app copied isn't copied again.
+
+<p align="center">
+  <img src="assets/screenshots/home.png" width="200" alt="Home: how much is already on the PC">
+  <img src="assets/screenshots/choose.png" width="200" alt="Pick what to send">
+  <img src="assets/screenshots/done.png" width="200" alt="Everything is safe">
+  <img src="assets/screenshots/home-light.png" width="200" alt="Light theme">
+</p>
 
 ## Download
 
@@ -22,7 +30,7 @@ Obtainium keeps the app up to date straight from this repository's releases. And
 
 ## Features
 
-- [x] Sends photos and videos to a Windows shared folder over your home Wi-Fi
+- [x] Sends photos and videos to a shared folder on a Windows PC, a Mac or a NAS (SMB 2 and 3), over your home Wi-Fi
 - [x] Pairs with a QR code shown by the PC set-up file, or finds your PC on the network and lists its shared folders
 - [x] Pick the albums (Camera, WhatsApp, screenshots...), photos or videos, and the period: everything, this month, last month, the last 3 to 12 months, a year, or from one month to another
 - [x] Sorted on the PC the way you like: by month like PixelGuard (`2026 November`), by year, by album, or all in one folder
