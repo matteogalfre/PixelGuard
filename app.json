@@ -65,11 +65,11 @@
         {
           "android": {
             "minSdkVersion": 30,
-            "buildArchs": ["arm64-v8a"],
+            "buildArchs": ["armeabi-v7a", "arm64-v8a"],
             "enableMinifyInReleaseBuilds": true,
             "enableShrinkResourcesInReleaseBuilds": true,
             "useLegacyPackaging": true,
-            "extraProguardRules": "-keep class com.hierynomus.** { *; }\n-keep class net.engio.mbassy.** { *; }\n-keep class expo.modules.pgnative.** { *; }\n-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod\n-dontwarn org.slf4j.**\n-dontwarn org.bouncycastle.**\n-dontwarn net.engio.mbassy.**\n-dontwarn javax.el.**\n-dontwarn org.ietf.jgss.**\n-dontwarn javax.security.auth.kerberos.**\n-dontwarn com.hierynomus.**"
+            "extraProguardRules": "-keep class com.hierynomus.** { *; }\n-keep class net.engio.mbassy.** { *; }\n-keep class expo.modules.pgnative.** { *; }\n-keep class com.journeyapps.barcodescanner.** { *; }\n-keep class com.google.zxing.** { *; }\n-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod\n-dontwarn org.slf4j.**\n-dontwarn org.bouncycastle.**\n-dontwarn net.engio.mbassy.**\n-dontwarn javax.el.**\n-dontwarn org.ietf.jgss.**\n-dontwarn javax.security.auth.kerberos.**\n-dontwarn com.hierynomus.**"
           }
         }
       ],
