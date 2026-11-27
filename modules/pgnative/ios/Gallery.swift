@@ -89,8 +89,14 @@ final class Gallery {
     }
   }
 
+  /**
+   * La taille d'un fichier. PhotoKit ne la donne pas en public : on lit la propriété privée
+   * « fileSize » seulement si elle existe encore (sinon value(forKey:) ferait planter l'appli).
+   * Repli : 0. L'envoi refuse alors la copie (taille différente) et rien n'est supprimé.
+   */
   private static func size(_ res: PHAssetResource) -> Int64 {
-    (res.value(forKey: "fileSize") as? NSNumber)?.int64Value ?? 0
+    guard res.responds(to: NSSelectorFromString("fileSize")) else { return 0 }
+    return (res.value(forKey: "fileSize") as? NSNumber)?.int64Value ?? 0
   }
 
   private static func stamp(_ a: PHAsset) -> Double {
@@ -265,8 +271,9 @@ final class Gallery {
     return AssetReader(res)
   }
 
-  func md5(_ uri: String, cancelled: () -> Bool) throws -> String {
+  func md5(_ uri: String, cancelled: @escaping () -> Bool) throws -> String {
     let reader = try reader(for: uri)
+    reader.isCancelled = cancelled
     guard reader.open() else { throw PgError("NO_FILE", "Fichier introuvable sur le téléphone") }
     defer { reader.close() }
     var md5 = Insecure.MD5()
@@ -276,7 +283,10 @@ final class Gallery {
     while true {
       if cancelled() { throw PgError("CANCELLED", "Arrêté") }
       let n = reader.read(buf, cap)
-      if n < 0 { throw PgError("TRANSFER", "Lecture de l'original impossible") }
+      if n < 0 {
+        if cancelled() { throw PgError("CANCELLED", "Arrêté") }
+        throw PgError("TRANSFER", "Lecture de l'original impossible")
+      }
       if n == 0 { break }
       md5.update(bufferPointer: UnsafeRawBufferPointer(start: buf, count: n))
     }
@@ -334,6 +344,8 @@ final class Gallery {
  */
 final class AssetReader: ByteSource {
   private static let maxBuffered = 8 << 20
+  /** Arrêter (ou la fin du temps d'arrière-plan) : une lecture en attente rend -1 sans tarder. */
+  var isCancelled: (() -> Bool)?
   private let resource: PHAssetResource
   private let cond = NSCondition()
   private var chunks: [Data] = []
@@ -367,6 +379,8 @@ final class AssetReader: ByteSource {
     options.isNetworkAccessAllowed = true
     let id = PHAssetResourceManager.default().requestData(for: resource, options: options, dataReceivedHandler: { [weak self] data in
       guard let self else { return }
+      // Un bloc vide n'apporte rien, et n'a pas d'adresse à copier.
+      if data.isEmpty { return }
       self.cond.lock()
       while self.generation == gen && !self.stopped && self.buffered >= Self.maxBuffered { self.cond.wait() }
       if self.generation == gen && !self.stopped {
@@ -392,14 +406,23 @@ final class AssetReader: ByteSource {
   }
 
   func read(_ buf: UnsafeMutablePointer<UInt8>, _ max: Int) -> Int {
+    let cancelled = isCancelled
     cond.lock()
     defer { cond.unlock() }
-    while chunks.isEmpty && !finished && !stopped { cond.wait() }
+    // Par tranches courtes : PhotoKit peut mettre longtemps à donner la suite, Arrêter passe avant.
+    while chunks.isEmpty && !finished && !stopped {
+      if cancelled?() == true { return -1 }
+      _ = cond.wait(until: Date(timeIntervalSinceNow: 0.2))
+    }
     if chunks.isEmpty { return failed || stopped ? -1 : 0 }
     var copied = 0
     while copied < max, let c = chunks.first {
       let n = min(c.count - head, max - copied)
-      c.withUnsafeBytes { raw in _ = memcpy(buf + copied, raw.baseAddress! + head, n) }
+      if n > 0 {
+        c.withUnsafeBytes { raw in
+          if let base = raw.baseAddress { _ = memcpy(buf + copied, base + head, n) }
+        }
+      }
       copied += n
       head += n
       if head == c.count {

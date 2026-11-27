@@ -1,5 +1,7 @@
 import {
   addToFolder,
+  canRelocate,
+  movedTo,
   decide,
   folderFor,
   folderState,
@@ -406,9 +408,11 @@ export async function runBackup(
     const uploads = cmp.uploads;
     // Ce qu'on apprend pendant l'envoi, enregistré par petits lots sur la dernière version.
     let pending: CopyIndex = { ...cmp.found };
-    const remember = (id: string, path: string, size: number) => {
-      index[id] = { path, size };
-      pending[id] = { path, size };
+    // `md5` et `mod` : seulement pour un fichier que cette sauvegarde vient d'envoyer.
+    const remember = (id: string, path: string, size: number, md5?: string, mod?: number) => {
+      const entry = md5 ? { path, size, md5, mod } : { path, size };
+      index[id] = entry;
+      pending[id] = entry;
     };
     const flush = async () => {
       const batch = pending;
@@ -473,8 +477,9 @@ export async function runBackup(
         emit();
         try {
           let target = joinPath(pc.folder, e.folder, e.remoteName);
+          let sent: { md5?: string };
           try {
-            await again(() => Pg.upload(e.item.uri, target, e.item.size, id, sourceKey(e.item)));
+            sent = await again(() => Pg.upload(e.item.uri, target, e.item.size, id, sourceKey(e.item)));
           } catch (err) {
             if (errorCode(err) !== 'EXISTS') throw err;
             // Ce nom est déjà pris sur le PC : si c'est ce fichier (même taille, lue sur le
@@ -499,11 +504,11 @@ export async function runBackup(
               return;
             }
             reserve(e.folder, d.remoteName);
-            await again(() => Pg.upload(e.item.uri, target, e.item.size, id, sourceKey(e.item)));
+            sent = await again(() => Pg.upload(e.item.uri, target, e.item.size, id, sourceKey(e.item)));
           }
           p.uploaded++;
           networkBytes += e.item.size;
-          remember(e.item.id, target, e.item.size);
+          remember(e.item.id, target, e.item.size, sent.md5 || undefined, e.item.modified);
           // Écrit de temps en temps (une coupure ne fait perdre que ça), sans faire attendre
           // l'envoi suivant : l'index d'une grosse galerie pèse plusieurs Mo.
           if (++sinceSave >= 200 || Date.now() - lastSave > 20_000) {
@@ -557,7 +562,8 @@ export async function runBackup(
 
 // ---------------------------------------------------------------- Libérer de la place
 
-export type FreeCandidate = { item: MediaItem; path: string };
+/** `md5` : l'empreinte prise à l'envoi, si l'original n'a pas changé depuis. */
+export type FreeCandidate = { item: MediaItem; path: string; md5?: string };
 
 export function dateOf(m: MediaItem): number {
   return m.taken > 0 ? m.taken : m.modified;
@@ -569,10 +575,18 @@ export async function findFreeCandidates(pcId: string, albumIds: string[], kinds
   const cutoff = Date.now() - olderThanDays * 86400e3;
   return items
     .filter((m) => index[m.id] && index[m.id].size === m.size && dateOf(m) < cutoff)
-    .map((m) => ({ item: m, path: index[m.id].path }));
+    .map((m) => {
+      const k = index[m.id];
+      // Original retouché depuis l'envoi (autre date) : on relit les deux, comme avant.
+      const md5 = k.md5 && k.mod === m.modified ? k.md5 : undefined;
+      return { item: m, path: k.path, md5 };
+    });
 }
 
-/** Relit chaque copie sur le PC et la compare octet par octet (MD5) à l'original. */
+/**
+ * Relit chaque copie sur le PC et la compare (MD5) à l'original : à l'empreinte prise pendant
+ * l'envoi quand l'original n'a pas changé depuis, sinon à l'original relu sur le téléphone.
+ */
 export async function verifyCandidates(opts: {
   pc: PcSettings;
   password: string;
@@ -599,7 +613,7 @@ export async function verifyCandidates(opts: {
     await connect(opts.pc, opts.password);
     await pool(opts.candidates, PARALLEL, async (c) => {
       try {
-        const r = await again(() => Pg.verify(c.item.uri, c.path, c.item.size));
+        const r = await again(() => Pg.verify(c.item.uri, c.path, c.item.size, c.md5 ?? ''));
         if (r.same) same.push(c);
         else different.push(c.item.name);
       } catch (err) {
@@ -675,6 +689,16 @@ export async function pairFromCode(
   const connected = await Pg.connect({ host: pc.host, share: pc.share, user: pc.user, password: p.password, encrypt: pc.encrypt, identity });
   await Pg.testWrite(pc.folder);
   return { pc, encrypted: connected.encrypted, info };
+}
+
+/**
+ * Le PC ne répond plus à son adresse : la box lui en a peut-être donné une autre. On le cherche
+ * sur le Wi-Fi par le nom qu'il annonce (retenu à l'appairage) et on renvoie sa nouvelle adresse,
+ * ou null. La connexion contrôle de toute façon ce nom avant d'envoyer le mot de passe.
+ */
+export async function relocate(pc: PcSettings): Promise<string | null> {
+  if (!canRelocate(pc.host, pc.identity)) return null;
+  return movedTo(await Pg.discover().catch(() => []), pc.host, pc.identity ?? '');
 }
 
 export async function speedTest(pc: PcSettings, password: string, onBytes: (b: number) => void) {

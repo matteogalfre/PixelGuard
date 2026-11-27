@@ -22,7 +22,8 @@ exit /b
 #      écrire que dans ce dossier (ton propre mot de passe ne quitte jamais le PC) ;
 #   3. ouvre le partage de fichiers sur les réseaux privés, et propose de passer ton Wi-Fi en
 #      « Privé » s'il est en « Public » ;
-#   4. affiche un code QR à scanner avec PixelGuard sur le téléphone.
+#   4. affiche un code QR à scanner avec PixelGuard sur le téléphone ;
+#   5. si tu le veux, garde chaque jour une version précédente du dossier (clichés de Windows).
 # Relancé plus tard, il donne un nouveau mot de passe, ou retire tout (les photos restent).
 #
 # Licence : GPL-3.0 ou plus récente. Le dessin du QR vient de qrcode-generator (MIT), en bas.
@@ -34,6 +35,8 @@ function T([string]$f, [string]$e) { if ($fr) { $f } else { $e } }
 
 $User = 'pixelguard'
 $ShareName = 'PixelGuard'
+$TaskName = 'PixelGuard versions'
+$PairingFile = Join-Path $env:TEMP 'pixelguard-appairage.html'
 $HideKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList'
 
 function Say([string]$text, [string]$color = 'Gray') { Write-Host $text -ForegroundColor $color }
@@ -121,6 +124,38 @@ function Test-Cloud([string]$dir) {
   }
 }
 
+# Le compte de l'appli peut modifier et effacer ce qu'il a écrit (il en a besoin pour les « .part »).
+# Si le téléphone ou le mot de passe tombait entre de mauvaises mains, les copies pourraient être
+# effacées : un cliché quotidien du disque permet de les retrouver (clic droit sur le dossier ›
+# Restaurer les versions précédentes). Proposé, jamais imposé : ça prend de la place sur le disque.
+function Enable-Versions([string]$dir) {
+  if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { return }
+  Say ''
+  Say (T 'Option : garder chaque jour une version précédente du dossier des photos. Si un jour des copies étaient effacées, Windows pourrait les rendre (clic droit sur le dossier › Restaurer les versions précédentes). Ça active la protection du système et prend jusqu''à 10 % du disque.' `
+         'Option: keep a previous version of the photo folder every day. If copies were ever deleted, Windows could bring them back (right-click the folder › Restore previous versions). It turns on System Protection and uses up to 10% of the disk.')
+  $a = Read-Host (T 'L''activer ? (o/N)' 'Turn it on? (y/N)')
+  if ($a -notmatch '^[oOyY]') { return }
+  try {
+    $drive = (Split-Path -Qualifier $dir) + '\'
+    $system = $env:SystemDrive + '\'
+    # Windows demande la protection du disque système avant celle d'un autre disque.
+    Enable-ComputerRestore -Drive (@($system, $drive) | Select-Object -Unique)
+    $letter = $drive.TrimEnd('\')
+    & vssadmin resize shadowstorage /for=$letter /on=$letter /maxsize=10% | Out-Null
+    $cmd = "Invoke-CimMethod -ClassName Win32_ShadowCopy -MethodName Create -Arguments @{ Volume = '$drive'; Context = 'ClientAccessible' }"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -EncodedCommand $encoded"
+    $trigger = New-ScheduledTaskTrigger -Daily -At '13:00'
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings `
+      -User 'SYSTEM' -RunLevel Highest -Description (T 'PixelGuard : un cliché par jour du disque des photos' 'PixelGuard: one snapshot a day of the photo disk') -Force | Out-Null
+    Start-ScheduledTask -TaskName $TaskName
+    Say (T '  Activé : un cliché par jour, le premier tout de suite.' '  On: one snapshot a day, the first one right now.') Green
+  } catch {
+    Say ((T '  Pas possible sur ce PC : ' '  Not possible on this PC: ') + $_.Exception.Message) Yellow
+  }
+}
+
 function Remove-PixelGuard {
   $share = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue
   if ($share) {
@@ -129,6 +164,8 @@ function Remove-PixelGuard {
   }
   if (Get-LocalUser -Name $User -ErrorAction SilentlyContinue) { Remove-LocalUser -Name $User }
   Remove-ItemProperty -Path $HideKey -Name $User -ErrorAction SilentlyContinue
+  # Les clichés déjà faits restent (Windows les efface quand il manque de place).
+  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
   Say ''
   Say (T 'PixelGuard est retiré de ce PC : plus de partage, plus de compte. Tes photos sont toujours dans le dossier.' `
          'PixelGuard is removed from this PC: no more share, no more account. Your photos are still in the folder.') Green
@@ -147,7 +184,7 @@ function Show-Pairing([string]$name, [string]$ip, [string]$pass) {
   $html = $Page.Replace('@@LANG@@', (T 'fr' 'en')).Replace('@@TITLE@@', $title).Replace('@@STEPS@@', $steps)
   $html = $html.Replace('@@MANUAL@@', $manual).Replace('@@CLOSE@@', $close).Replace('@@LIB@@', $QrLib)
   $html = $html.Replace('@@LINK@@', (ConvertTo-Json $link))
-  $file = Join-Path $env:TEMP 'pixelguard-appairage.html'
+  $file = $PairingFile
   [IO.File]::WriteAllText($file, $html, (New-Object Text.UTF8Encoding $false))
   Start-Process $file
 
@@ -162,6 +199,9 @@ function Show-Pairing([string]$name, [string]$ip, [string]$pass) {
 
 function Main {
   $Host.UI.RawUI.WindowTitle = 'PixelGuard'
+  # Une page de code restée d'une fois où la fenêtre a été fermée sans Entrée : elle contient le
+  # mot de passe, on l'efface.
+  Remove-Item $PairingFile -ErrorAction SilentlyContinue
   Say ''
   Say (T 'PixelGuard : préparation de ce PC' 'PixelGuard: preparing this PC') Cyan
   Say ''
@@ -223,6 +263,7 @@ function Main {
   }
   Get-NetFirewallRule -Group '@FirewallAPI.dll,-28502' | Where-Object { "$($_.Profile)" -like '*Private*' } | Enable-NetFirewallRule
   Set-PrivateNetwork
+  Enable-Versions $dir
 
   Say ''
   Say ((T 'Prêt : les photos arriveront dans ' 'Ready: photos will arrive in ') + $dir) Green

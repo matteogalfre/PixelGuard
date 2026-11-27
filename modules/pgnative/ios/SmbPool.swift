@@ -92,15 +92,42 @@ private final class EntriesBox { var items: [[String: Any]] = [] }
 private func code(_ rc: Int32) -> Int { Int(rc) }
 
 /**
+ * Une connexion ouverte, avec la cible pour laquelle elle a été ouverte (PC, partage, compte) et
+ * la génération du pool à ce moment-là. Elle ne sert que si les deux sont encore les bonnes.
+ */
+private final class PooledConn {
+  let ptr: OpaquePointer
+  let host: String
+  let share: String
+  let user: String
+  let generation: Int
+
+  init(_ ptr: OpaquePointer, _ t: SmbTarget, _ generation: Int) {
+    self.ptr = ptr
+    host = t.host
+    share = t.share
+    user = t.user
+    self.generation = generation
+  }
+
+  func fits(_ t: SmbTarget?, _ g: Int) -> Bool {
+    guard let t else { return false }
+    return generation == g && host == t.host && share == t.share && user == t.user
+  }
+}
+
+/**
  * Les connexions au dossier partagé : jusqu'à 4 à la fois (une par envoi en parallèle), chacune
  * utilisée par un seul fil. Une connexion coupée est refaite au prochain appel.
  */
 final class SmbPool {
   private static let maxConnections = 4
+  /** login et connect, un seul à la fois : deux appairages croisés ne mélangent pas leurs PC. */
+  private let setup = NSLock()
   private let cond = NSCondition()
   private var target: SmbTarget?
   private var server = ""
-  private var idle: [OpaquePointer] = []
+  private var idle: [PooledConn] = []
   private var open = 0
   private var generation = 0
   private var lastInfo = pgs_info()
@@ -148,6 +175,8 @@ final class SmbPool {
     case Int(PGS_CANCELLED): return PgError("CANCELLED", "Arrêté")
     case Int(PGS_NOT_ENCRYPTED):
       return PgError("NOT_ENCRYPTED", "Ce PC n'a pas accepté le chiffrement : rien n'a été envoyé. Chez toi, tu peux couper le chiffrement dans les réglages de ce PC.")
+    case Int(PGS_BUSY):
+      return PgError("BUSY", "Le PC garde ce fichier ouvert (autre appareil, ou envoi coupé à l'instant) : il repartira à la prochaine sauvegarde")
     case Int(PGS_PC_CHANGED):
       return PgError("PC_CHANGED", "Ce n'est pas le PC appairé (il s'annonce comme « \(msg) ») : ni ton mot de passe ni tes photos ne sont partis. Si tu as renommé ton PC, refais l'appairage.")
     default: return PgError("SMB", msg.isEmpty ? "Le PC refuse" : msg)
@@ -186,6 +215,8 @@ final class SmbPool {
 
   /** Connexion au PC et liste de ses dossiers partagés (null si le PC refuse de les lister). */
   func login(_ t: SmbTarget) throws -> [String: Any] {
+    setup.lock()
+    defer { setup.unlock() }
     closeAll()
     let server = try Self.serverAddress(t.host)
     do {
@@ -206,8 +237,10 @@ final class SmbPool {
   }
 
   func connect(_ t: SmbTarget) throws -> [String: Any] {
+    setup.lock()
+    defer { setup.unlock() }
     cond.lock()
-    if target == t && (open > idle.count || idle.contains(where: { pgs_alive($0) != 0 })) {
+    if target == t && (open > idle.count || idle.contains(where: { pgs_alive($0.ptr) != 0 })) {
       let info = lastInfo
       let identity = lastIdentity
       cond.unlock()
@@ -218,13 +251,18 @@ final class SmbPool {
     let server = try Self.serverAddress(t.host)
     let (c, info, seen) = try Self.openConn(server, t, share: t.share.trimmingCharacters(in: CharacterSet(charactersIn: "\\/ ")), strict: true)
     cond.lock()
+    // Nouvelle génération : une connexion ouverte entre-temps pour l'ancienne cible ne servira pas.
+    generation += 1
+    let stale = idle
     target = t
     self.server = server
-    idle.append(c)
+    idle = [PooledConn(c, t, generation)]
     open = 1
     lastInfo = info
     lastIdentity = seen
+    cond.broadcast()
     cond.unlock()
+    stale.forEach { pgs_close($0.ptr) }
     return Self.describe(info, shares: NSNull(), identity: seen)
   }
 
@@ -236,44 +274,47 @@ final class SmbPool {
     generation += 1
     cond.broadcast()
     cond.unlock()
-    list.forEach { pgs_close($0) }
+    list.forEach { pgs_close($0.ptr) }
   }
 
-  private func checkout() throws -> (OpaquePointer, Int) {
+  /**
+   * Emprunte une connexion vers la cible actuelle. Une connexion d'une autre génération ou vers
+   * une autre cible (PC, partage, compte) n'est jamais rendue : elle est fermée.
+   */
+  private func checkout() throws -> PooledConn {
     cond.lock()
     while true {
       guard let t = target else {
         cond.unlock()
         throw PgError("NOT_CONNECTED", "Pas connecté au PC")
       }
+      let g = generation
       if let c = idle.popLast() {
-        if pgs_alive(c) != 0 {
-          let g = generation
+        if c.fits(t, g) && pgs_alive(c.ptr) != 0 {
           cond.unlock()
-          return (c, g)
+          return c
         }
-        open -= 1
+        if c.generation == g { open -= 1 }
         cond.unlock()
-        pgs_close(c)
+        pgs_close(c.ptr)
         cond.lock()
         continue
       }
       if open < Self.maxConnections {
         open += 1
-        let g = generation
         let server = self.server
         let pinned = lastIdentity
         cond.unlock()
+        let conn: PooledConn
+        let info: pgs_info
         do {
           // Wi-Fi coupé entre deux envois : on rouvre une connexion.
           // Si le PC n'était pas encore identifié, le nom vu à la première connexion fait foi.
           var known = t
           if known.identity.isEmpty { known.identity = pinned }
-          let (c, info, _) = try Self.openConn(server, known, share: known.share.trimmingCharacters(in: CharacterSet(charactersIn: "\\/ ")), strict: true)
-          cond.lock()
-          if g == generation { lastInfo = info }
-          cond.unlock()
-          return (c, g)
+          let opened = try Self.openConn(server, known, share: known.share.trimmingCharacters(in: CharacterSet(charactersIn: "\\/ ")), strict: true)
+          conn = PooledConn(opened.0, t, g)
+          info = opened.1
         } catch {
           cond.lock()
           if g == generation { open -= 1 }
@@ -281,28 +322,41 @@ final class SmbPool {
           cond.unlock()
           throw error
         }
+        cond.lock()
+        if conn.fits(target, generation) {
+          lastInfo = info
+          cond.unlock()
+          return conn
+        }
+        // La cible a changé pendant l'ouverture : cette connexion vise l'ancienne, on la ferme.
+        // (La nouvelle génération a remis le compte à zéro, rien à décompter.)
+        cond.broadcast()
+        cond.unlock()
+        pgs_close(conn.ptr)
+        cond.lock()
+        continue
       }
       cond.wait()
     }
   }
 
-  private func checkin(_ c: OpaquePointer, _ g: Int) {
+  private func checkin(_ c: PooledConn) {
     cond.lock()
-    let keep = g == generation && pgs_alive(c) != 0
+    let keep = c.fits(target, generation) && pgs_alive(c.ptr) != 0
     if keep {
       idle.append(c)
-    } else if g == generation {
+    } else if c.generation == generation {
       open -= 1
     }
     cond.broadcast()
     cond.unlock()
-    if !keep { pgs_close(c) }
+    if !keep { pgs_close(c.ptr) }
   }
 
   private func with<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
-    let (c, g) = try checkout()
-    defer { checkin(c, g) }
-    return try body(c)
+    let c = try checkout()
+    defer { checkin(c) }
+    return try body(c.ptr)
   }
 
   func list(_ dir: String) throws -> [[String: Any]] {
@@ -349,16 +403,23 @@ final class SmbPool {
     }
   }
 
-  func upload(_ box: TransferBox, _ target: String, _ expected: Int64, keep: Bool, mayResume: Bool) throws -> Int64 {
+  /**
+   * Octets envoyés, et MD5 (hexadécimal minuscule) de tout l'original tel que lu et envoyé ("" si
+   * `md5` vaut false : le test de vitesse n'en a pas besoin).
+   */
+  func upload(_ box: TransferBox, _ target: String, _ expected: Int64, keep: Bool, mayResume: Bool, md5 wantMd5: Bool = true) throws -> (bytes: Int64, md5: String) {
     try with { c in
       var src = box.cSource()
       var sent: Int64 = 0
+      let md5 = UnsafeMutablePointer<CChar>.allocate(capacity: 33)
+      defer { md5.deallocate() }
+      md5.initialize(repeating: 0, count: 33)
       let err = CErr()
       let rc = withExtendedLifetime(box) {
-        code(pgs_upload(c, &src, target, expected, keep ? 1 : 0, mayResume ? 1 : 0, &sent, err.p, CErr.size))
+        code(pgs_upload(c, &src, target, expected, keep ? 1 : 0, mayResume ? 1 : 0, &sent, wantMd5 ? md5 : nil, err.p, CErr.size))
       }
       if rc != Int(PGS_OK) { throw Self.error(rc, err) }
-      return sent
+      return (sent, String(cString: md5))
     }
   }
 

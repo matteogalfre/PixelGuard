@@ -26,23 +26,45 @@ public final class MiniServer {
     final String download;
 
     public Page(String type, byte[] body, String download) {
+      // Ces deux valeurs finissent dans les en-têtes : ni retour à la ligne ni guillemet.
+      if (unsafe(type) || unsafe(download)) throw new IllegalArgumentException("En-tête invalide");
       this.type = type;
       this.body = body;
       this.download = download == null || download.isEmpty() ? null : download;
     }
   }
 
+  private static boolean unsafe(String v) {
+    return v != null && (v.indexOf('\r') >= 0 || v.indexOf('\n') >= 0 || v.indexOf('"') >= 0);
+  }
+
+  /** Temps total accordé à une requête : un client lent ne bloque ni le serveur ni son arrêt. */
+  static final long REQUEST_MS = 5000;
+
   private final ServerSocket socket;
   private final Map<String, Page> pages;
+  private final java.util.concurrent.ExecutorService workers = java.util.concurrent.Executors.newFixedThreadPool(4, r -> {
+    Thread t = new Thread(r, "pixelguard-http-req");
+    t.setDaemon(true);
+    return t;
+  });
   private volatile boolean running = true;
 
-  /** Écoute sur `port` s'il est libre, sinon sur un port au hasard. */
+  /** Écoute sur `port` s'il est libre, sinon sur un port au hasard, sur toutes les adresses. */
   public MiniServer(int port, Map<String, Page> pages) throws IOException {
+    this(port, pages, null);
+  }
+
+  /**
+   * `bind` : la seule adresse où écouter (celle du Wi-Fi). Ni le point d'accès, ni un VPN, ni les
+   * données mobiles ne voient alors le serveur.
+   */
+  public MiniServer(int port, Map<String, Page> pages, InetAddress bind) throws IOException {
     ServerSocket s;
     try {
-      s = new ServerSocket(port, 8);
+      s = new ServerSocket(port, 8, bind);
     } catch (IOException e) {
-      s = new ServerSocket(0, 8);
+      s = new ServerSocket(0, 8, bind);
     }
     socket = s;
     this.pages = pages;
@@ -55,21 +77,37 @@ public final class MiniServer {
     return socket.getLocalPort();
   }
 
-  public void stop() {
+  public synchronized void stop() {
     running = false;
     try {
       socket.close();
     } catch (IOException ignored) {
     }
+    workers.shutdownNow();
   }
 
   private void loop() {
     while (running) {
-      try (Socket c = socket.accept()) {
-        c.setSoTimeout(5000);
-        respond(pages, c.getInputStream(), c.getOutputStream());
+      final Socket c;
+      try {
+        c = socket.accept();
       } catch (IOException e) {
         if (!running) return;
+        continue;
+      }
+      try {
+        workers.execute(() -> {
+          try (Socket client = c) {
+            client.setSoTimeout((int) REQUEST_MS);
+            respond(pages, client.getInputStream(), client.getOutputStream());
+          } catch (IOException ignored) {
+          }
+        });
+      } catch (java.util.concurrent.RejectedExecutionException e) {
+        try {
+          c.close();
+        } catch (IOException ignored) {
+        }
       }
     }
   }
@@ -106,8 +144,10 @@ public final class MiniServer {
   /** La première ligne de la requête (« GET /chemin HTTP/1.1 »), en lisant au plus 8 Ko d'en-têtes. */
   static String requestLine(InputStream in) throws IOException {
     ByteArrayOutputStream head = new ByteArrayOutputStream();
+    long deadline = System.nanoTime() + REQUEST_MS * 1_000_000L;
     int a = -1, b = -1, c = -1, d;
     while (head.size() < 8192 && (d = in.read()) >= 0) {
+      if (System.nanoTime() > deadline) throw new IOException("Requête trop lente");
       head.write(d);
       if (a == '\r' && b == '\n' && c == '\r' && d == '\n') break;
       a = b;

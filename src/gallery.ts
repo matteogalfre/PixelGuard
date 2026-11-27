@@ -5,6 +5,10 @@ import { Pg, type Album, type MediaItem } from './native';
 let version = '';
 let albums: Album[] | null = null;
 const media = new Map<string, MediaItem[]>();
+let epoch = 0;
+
+/** Change chaque fois que la copie de la galerie est oubliée : de quoi savoir qu'elle a bougé. */
+export const galleryEpoch = () => epoch;
 
 async function check(): Promise<void> {
   const v = await Pg.galleryVersion().catch(() => '');
@@ -15,6 +19,7 @@ async function check(): Promise<void> {
 
 /** À l'oubli : retour dans l'appli, accès aux photos redemandé. */
 export function forgetGallery(): void {
+  epoch++;
   version = '';
   albums = null;
   media.clear();

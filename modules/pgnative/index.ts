@@ -62,9 +62,16 @@ export type PgApi = {
   statFiles(paths: string[]): Promise<number[]>;
   testWrite(dir: string): Promise<{ ok: boolean }>;
   speedTest(dir: string, megabytes: number): Promise<SpeedResult>;
-  /** `sourceKey` identifie l'original : seul un « .part » écrit par lui peut être repris. */
-  upload(uri: string, remotePath: string, size: number, transferId: string, sourceKey: string): Promise<{ bytes: number }>;
-  verify(uri: string, remotePath: string, size: number): Promise<VerifyResult>;
+  /**
+   * `sourceKey` identifie l'original : seul un « .part » écrit par lui peut être repris.
+   * `md5` : empreinte de tout l'original tel qu'il a été lu et envoyé (reprise comprise).
+   */
+  upload(uri: string, remotePath: string, size: number, transferId: string, sourceKey: string): Promise<{ bytes: number; md5: string }>;
+  /**
+   * `expectedMd5` vide : relit l'original et la copie. Sinon (empreinte prise à l'envoi, original
+   * inchangé depuis), ne relit que la copie du PC.
+   */
+  verify(uri: string, remotePath: string, size: number, expectedMd5: string): Promise<VerifyResult>;
   cancel(): void;
   resetCancel(): void;
   holdWifi(on: boolean): void;

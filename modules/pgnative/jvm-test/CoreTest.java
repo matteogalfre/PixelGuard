@@ -73,8 +73,10 @@ public class CoreTest {
     byte[] data = new byte[7_340_033]; new Random(7).nextBytes(data);
     long[] last = {0}; int[] calls = {0};
     long t = System.nanoTime();
+    java.security.MessageDigest md1 = SmbCore.newMd5();
     long n = SmbCore.upload(share, () -> new ByteArrayInputStream(data), "Tel/2026 Novembre/IMG_1.jpg", data.length,
-        proto.getMaxWriteSize(), true, false, b -> { last[0] = b; calls[0]++; }, () -> false);
+        proto.getMaxWriteSize(), true, false, b -> { last[0] = b; calls[0]++; }, () -> false, md1);
+    String sentMd5 = SmbCore.hex(md1.digest());
     double sec = (System.nanoTime() - t) / 1e9;
     System.out.printf("envoi=%d octets, progression=%d appels (dernier %d), %.1f Mo/s%n", n, calls[0], last[0], n / sec / 1e6);
     byte[] onDisk = Files.readAllBytes(Paths.get(shareDir, "Tel", "2026 Novembre", "IMG_1.jpg"));
@@ -84,6 +86,13 @@ public class CoreTest {
     System.out.println("stat direct : " + st[0] + " / " + st[1] + " / " + st[2]);
     String local = SmbCore.md5(new ByteArrayInputStream(data), () -> false);
     String remote = SmbCore.md5Remote(share, "Tel/2026 Novembre/IMG_1.jpg", data.length, proto.getMaxReadSize(), () -> false);
+    System.out.println("md5 pris pendant l'envoi=remote " + sentMd5.equals(remote));
+    // Petite photo : tampons à sa taille, fichier identique.
+    byte[] tiny = new byte[200_000]; new Random(9).nextBytes(tiny);
+    java.security.MessageDigest mdTiny = SmbCore.newMd5();
+    SmbCore.upload(share, () -> new ByteArrayInputStream(tiny), "Tel/2026 Novembre/IMG-WA.jpg", tiny.length, proto.getMaxWriteSize(), true, false, b -> {}, () -> false, mdTiny);
+    System.out.println("petite photo identique=" + Arrays.equals(Files.readAllBytes(Paths.get(shareDir, "Tel", "2026 Novembre", "IMG-WA.jpg")), tiny)
+        + ", md5 juste=" + SmbCore.hex(mdTiny.digest()).equals(SmbCore.md5(new ByteArrayInputStream(tiny), () -> false)));
     System.out.println("md5 local=remote " + local.equals(remote) + " absent=" + SmbCore.md5Remote(share, "Tel/nope.jpg", 5, proto.getMaxReadSize(), () -> false));
     try {
       SmbCore.upload(share, () -> new ByteArrayInputStream(data), "Tel/2026 Novembre/IMG_1.jpg", data.length, proto.getMaxWriteSize(), true, false, b -> {}, () -> false);
@@ -111,8 +120,10 @@ public class CoreTest {
       System.out.println("coupé, .part gardé=" + Files.exists(bigPart) + " (" + Files.size(bigPart) / 1048576 + " Mo)");
     }
     long[] first = {-1};
+    java.security.MessageDigest mdBig = SmbCore.newMd5();
     SmbCore.upload(share, () -> new ByteArrayInputStream(big), bigPath, big.length, proto.getMaxWriteSize(), true, true,
-        b -> { if (first[0] < 0) first[0] = b; }, () -> false);
+        b -> { if (first[0] < 0) first[0] = b; }, () -> false, mdBig);
+    System.out.println("md5 d'un envoi repris = md5 de tout l'original : " + SmbCore.hex(mdBig.digest()).equals(SmbCore.md5(new ByteArrayInputStream(big), () -> false)));
     System.out.println("repris à " + first[0] / 1048576 + " Mo, " + diff(Files.readAllBytes(Paths.get(shareDir, "Tel", "2026 Novembre", "VID_1.mp4")), big) + ", .part restant=" + Files.exists(bigPart));
     // Un .part écrit par un autre original (le téléphone ne le reconnaît pas) : on repart de zéro,
     // même si ses 64 derniers Ko ressemblent.

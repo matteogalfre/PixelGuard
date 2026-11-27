@@ -71,7 +71,10 @@ static int fail(pgs_conn *c, int rc, char *err, size_t errlen) {
   // Session fermée par le PC (inactivité, redémarrage du service) : c'est une coupure aussi.
   if (!sock_ok(smb2) || rc == -ETIMEDOUT || rc == -ECONNRESET || rc == -EPIPE || rc == -ENOTCONN ||
       st == SMB2_STATUS_SHUTDOWN || st == SMB2_STATUS_CANCELLED || st == SMB2_STATUS_USER_SESSION_DELETED ||
-      st == SMB2_STATUS_NETWORK_NAME_DELETED || st == PGS_STATUS_NETWORK_SESSION_EXPIRED) {
+      st == SMB2_STATUS_NETWORK_NAME_DELETED || st == PGS_STATUS_NETWORK_SESSION_EXPIRED ||
+      // Le PC ne répond plus (délai de libsmb2 ou le nôtre) : une coupure, pas un refus. La
+      // réponse peut encore arriver plus tard, la connexion ne doit plus servir.
+      st == SMB2_STATUS_IO_TIMEOUT) {
     seterr(err, errlen, "Connexion au PC perdue (%s)", smb2_get_error(smb2));
     kill_conn(c);
     return PGS_CONNECTION;
@@ -144,6 +147,9 @@ int pgs_connect2(const char *server, const char *share, const char *domain, cons
     if (domain != NULL && *domain) smb2_set_domain(smb2, domain);
     smb2_set_security_mode(smb2, SMB2_NEGOTIATE_SIGNING_ENABLED);
     // Signature exigée (Windows 11 l'exige aussi) ; un invité n'a pas de clé pour signer.
+    // Avec sign à 1, libsmb2 annonce « signature requise », refuse un PC qui ne signe pas, une
+    // réponse de session non signée (donc un passage en invité) et tout message non signé ou mal
+    // signé ensuite. Seul le chiffrement SMB 3, qui protège mieux, la remplace.
     smb2_set_sign(smb2, guest ? 0 : 1);
     smb2_set_seal(smb2, seal);
     smb2_pg_set_expected_server_name(smb2, expected_name);
@@ -178,7 +184,9 @@ int pgs_connect2(const char *server, const char *share, const char *domain, cons
       smb2_destroy_context(smb2);
       return PGS_PC_CHANGED;
     }
-    if (seal && want_seal == PGS_SEAL_MUST && (strstr(msg, "ncryption") != NULL || (dialect != 0 && dialect < SMB2_VERSION_0300))) {
+    // Le PC refuse vraiment le chiffrement : il le dit, ou il ne parle que SMB 2.
+    int seal_refused = seal && (strstr(msg, "ncryption") != NULL || (dialect != 0 && dialect < SMB2_VERSION_0300));
+    if (seal_refused && want_seal == PGS_SEAL_MUST) {
       seterr(err, errlen, "%s", msg);
       smb2_destroy_context(smb2);
       return PGS_NOT_ENCRYPTED;
@@ -196,9 +204,11 @@ int pgs_connect2(const char *server, const char *share, const char *domain, cons
     }
     seterr(err, errlen, "%s", msg);
     smb2_destroy_context(smb2);
-    // Appairage : chiffrement impossible (SMB 2 seulement, ou refusé), on refait sans, signé, et
-    // l'écran le dit. Ailleurs (PGS_SEAL_MUST), la boucle s'arrête là.
-    if (seal && want_seal == PGS_SEAL_IF_POSSIBLE && code != PGS_AUTH && code != PGS_UNREACHABLE) continue;
+    // Appairage : seulement si le PC refuse vraiment le chiffrement (SMB 2 seulement, ou refus
+    // dit), on refait sans, signé, et l'écran le dit. Tout autre échec est rendu tel quel : une
+    // coupure ou un refus ne doit pas faire passer la connexion en clair. Ailleurs
+    // (PGS_SEAL_MUST), la boucle s'arrête là.
+    if (seal_refused && want_seal == PGS_SEAL_IF_POSSIBLE && code != PGS_AUTH) continue;
     return code;
   }
   return PGS_SMB;
@@ -385,9 +395,35 @@ static void write_cb(struct smb2_context *smb2, int status, void *command_data, 
   s->done = 1;
 }
 
-/** Fait tourner libsmb2 jusqu'à ce que `*flag` passe à 1, 120 s au plus. */
-static int service_until(pgs_conn *c, const int *flag) {
-  time_t start = time(NULL);
+static void hex(const unsigned char *d, int n, char *out) {
+  static const char digits[] = "0123456789abcdef";
+  for (int i = 0; i < n; i++) {
+    out[2 * i] = digits[d[i] >> 4];
+    out[2 * i + 1] = digits[d[i] & 15];
+  }
+  out[2 * n] = 0;
+}
+
+static double mono(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
+}
+
+static int stop_asked(pgs_source *src) { return src != NULL && src->cancelled != NULL && src->cancelled(src->ctx); }
+
+/** Sans réponse du PC pendant ce temps, c'est une coupure. */
+#define PGS_REPLY_TIMEOUT 120.0
+/** Après Arrêter, le temps laissé au PC pour confirmer les écritures déjà parties. */
+#define PGS_STOP_GRACE 2.0
+
+/**
+ * Fait tourner libsmb2 jusqu'à ce que `*flag` passe à 1. -ETIMEDOUT si le PC ne répond pas en
+ * 120 s. Après Arrêter (ou la fin du temps d'arrière-plan), on laisse encore 2 s au PC, puis
+ * -ECANCELED : une réponse peut encore arriver, la connexion devra donc être fermée.
+ */
+static int service_until(pgs_conn *c, const int *flag, pgs_source *src) {
+  double start = mono(), stop_seen = 0;
   while (!*flag) {
     struct smb2_context *smb2 = c->smb2;
     if (smb2 == NULL || !sock_ok(smb2)) return -ENOTCONN;
@@ -395,14 +431,21 @@ static int service_until(pgs_conn *c, const int *flag) {
     memset(&pfd, 0, sizeof(pfd));
     pfd.fd = smb2_get_fd(smb2);
     pfd.events = smb2_which_events(smb2);
-    int r = poll(&pfd, 1, 1000);
+    // Par tranches courtes, pour voir Arrêter vite.
+    int r = poll(&pfd, 1, 250);
     if (r < 0 && errno != EINTR) return -errno;
     if (smb2->timeout) smb2_timeout_pdus(smb2);
     if (r > 0 && pfd.revents != 0 && smb2_service(smb2, pfd.revents) < 0) {
       if (*flag) break;
       return -ECONNRESET;
     }
-    if (time(NULL) - start > 120) return -ETIMEDOUT; // « Le PC ne répond plus »
+    if (*flag) break;
+    double t = mono();
+    if (stop_asked(src)) {
+      if (stop_seen == 0) stop_seen = t;
+      else if (t - stop_seen >= PGS_STOP_GRACE) return -ECANCELED;
+    }
+    if (t - start > PGS_REPLY_TIMEOUT) return -ETIMEDOUT; // « Le PC ne répond plus »
   }
   return 0;
 }
@@ -418,12 +461,22 @@ static int read_full(pgs_source *src, uint8_t *buf, int max) {
   return filled;
 }
 
-static int skip_full(pgs_source *src, uint8_t *scratch, int scratch_len, int64_t n) {
+/** Codes de lecture de l'original, en plus d'un nombre d'octets. */
+#define READ_FAILED (-1)
+#define READ_STOPPED (-2)
+
+/**
+ * Lit `n` octets de la source et les passe dans le MD5 (le début d'une reprise : il est déjà sur
+ * le PC, mais le MD5 rendu doit couvrir tout l'original). Arrêter est regardé à chaque bloc.
+ */
+static int hash_full(pgs_source *src, uint8_t *scratch, int scratch_len, int64_t n, struct MD5Context *md5) {
   while (n > 0) {
+    if (stop_asked(src)) return READ_STOPPED;
     int want = n > scratch_len ? scratch_len : (int)n;
     int got = read_full(src, scratch, want);
-    if (got < 0) return got;
-    if (got < want) return -1; // fichier plus court que prévu
+    if (got < 0) return stop_asked(src) ? READ_STOPPED : READ_FAILED;
+    if (got < want) return READ_FAILED; // fichier plus court que prévu
+    MD5Update(md5, scratch, (unsigned)got);
     n -= got;
   }
   return 0;
@@ -448,11 +501,12 @@ static int pread_full(pgs_conn *c, struct smb2fh *fh, uint8_t *buf, uint32_t len
  * en route quand il a été coupé : le PC a pu en appliquer une plus loin sans la précédente, et
  * laisser un trou de zéros. Tout ce qui précède `fin - DEPTH × CHUNK` a en revanche été confirmé.
  * On reprend donc à ce point-là, si les 64 Ko juste avant sont identiques au même endroit de
- * l'original. Renvoie l'octet où reprendre (0 sinon), la source restant positionnée dessus.
- * <0 si l'original ne se lit pas.
+ * l'original. Renvoie l'octet où reprendre (0 sinon), la source restant positionnée dessus et
+ * tout ce qui précède passé dans `md5`. READ_FAILED si l'original ne se lit pas, READ_STOPPED
+ * si Arrêter arrive pendant la relecture.
  */
 static int64_t resume_offset(pgs_conn *c, struct smb2fh *fh, pgs_source *src, int64_t existing,
-                             int64_t expected, uint8_t *scratch, uint32_t max_read) {
+                             int64_t expected, uint8_t *scratch, uint32_t max_read, struct MD5Context *md5) {
   if (existing < PGS_RESUME_MIN || expected <= existing) return 0;
   int64_t start = existing - (int64_t)PGS_DEPTH * PGS_CHUNK;
   int probe = start < RESUME_PROBE ? (int)start : RESUME_PROBE;
@@ -462,12 +516,17 @@ static int64_t resume_offset(pgs_conn *c, struct smb2fh *fh, pgs_source *src, in
   int64_t result = 0;
   int got = pread_full(c, fh, remote, (uint32_t)probe, (uint64_t)(start - probe), max_read);
   if (got == probe) {
-    if (skip_full(src, scratch, PGS_CHUNK, start - probe) < 0) {
-      result = -1;
+    int rc = hash_full(src, scratch, PGS_CHUNK, start - probe, md5);
+    if (rc < 0) {
+      result = rc;
     } else {
       int n = read_full(src, scratch, probe);
-      if (n < 0) result = -1;
-      else if (n == probe && memcmp(remote, scratch, (size_t)probe) == 0) result = start;
+      if (n < 0) {
+        result = stop_asked(src) ? READ_STOPPED : READ_FAILED;
+      } else if (n == probe && memcmp(remote, scratch, (size_t)probe) == 0) {
+        MD5Update(md5, scratch, (unsigned)probe);
+        result = start;
+      }
     }
   }
   free(remote);
@@ -475,8 +534,9 @@ static int64_t resume_offset(pgs_conn *c, struct smb2fh *fh, pgs_source *src, in
 }
 
 int pgs_upload(pgs_conn *c, pgs_source *src, const char *target, int64_t expected, int keep,
-               int may_resume, int64_t *sent, char *err, size_t errlen) {
+               int may_resume, int64_t *sent, char md5_out[33], char *err, size_t errlen) {
   *sent = 0;
+  if (md5_out != NULL) md5_out[0] = 0;
   if (!pgs_alive(c)) return fail(c, -ENOTCONN, err, errlen);
   pgs_info info;
   pgs_get_info(c, &info);
@@ -492,9 +552,14 @@ int pgs_upload(pgs_conn *c, pgs_source *src, const char *target, int64_t expecte
   int fifo[PGS_DEPTH + 1];
   int head = 0, count = 0;
   int result = PGS_OK;
-  int renamed = 0, resumable = 0, opened = 0;
+  int renamed = 0, resumable = 0, opened = 0, part_opened = 0;
+  int cancelled = 0, aborted = 0;
   int64_t acked = 0;
+  // Ce qui est sûrement sur le PC dans le « .part » (pour décider de le garder à l'arrêt).
+  int64_t on_pc = 0;
   struct smb2fh *fh = NULL;
+  struct MD5Context md5;
+  MD5Init(&md5);
 
   if (final_path == NULL || (part = malloc(strlen(final_path) + 6)) == NULL) {
     free(final_path);
@@ -518,13 +583,16 @@ int pgs_upload(pgs_conn *c, pgs_source *src, const char *target, int64_t expecte
                  keep ? (O_RDWR | O_CREAT | SMB2_O_EXCLUSIVE_SHARE) : (O_RDWR | O_CREAT | O_TRUNC));
   if (fh == NULL) {
     if (c->smb2 != NULL && (uint32_t)smb2_get_nterror(c->smb2) == SMB2_STATUS_SHARING_VIOLATION) {
+      // Juste après une coupure Wi-Fi, Windows garde l'ancien « .part » ouvert un moment : il
+      // n'est pas à nous d'y toucher, et il resservira pour la reprise.
       seterr(err, errlen, "Le PC garde ce fichier ouvert (autre appareil, ou envoi coupé à l'instant) : il repartira à la prochaine sauvegarde");
-      result = PGS_SMB;
+      result = PGS_BUSY;
     } else {
       result = fail(c, -EIO, err, errlen);
     }
     goto out;
   }
+  part_opened = 1;
   if (src->open(src->ctx) != 0) {
     seterr(err, errlen, "Impossible de lire l'original");
     result = PGS_TRANSFER;
@@ -540,8 +608,16 @@ int pgs_upload(pgs_conn *c, pgs_source *src, const char *target, int64_t expecte
       goto out;
     }
     existing = (int64_t)st.smb2_size;
+    on_pc = existing;
   }
-  int64_t start = may_resume ? resume_offset(c, fh, src, existing, expected, slots[0].buf, max_read) : 0;
+  int64_t start = may_resume ? resume_offset(c, fh, src, existing, expected, slots[0].buf, max_read, &md5) : 0;
+  if (start == READ_STOPPED) {
+    // Arrêté pendant la relecture du début : le « .part » reste pour la prochaine fois.
+    seterr(err, errlen, "Arrêté");
+    result = PGS_CANCELLED;
+    resumable = keep;
+    goto out;
+  }
   if (start < 0) {
     seterr(err, errlen, "Fichier plus court que prévu");
     result = PGS_TRANSFER;
@@ -557,8 +633,10 @@ int pgs_upload(pgs_conn *c, pgs_source *src, const char *target, int64_t expecte
       result = fail(c, rc, err, errlen);
       goto out;
     }
+    on_pc = 0;
     src->close(src->ctx);
     opened = 0;
+    MD5Init(&md5);
     if (src->open(src->ctx) != 0) {
       seterr(err, errlen, "Impossible de lire l'original");
       result = PGS_TRANSFER;
@@ -571,24 +649,34 @@ int pgs_upload(pgs_conn *c, pgs_source *src, const char *target, int64_t expecte
   acked = start;
   if (src->progress) src->progress(src->ctx, acked);
   int slot = 0;
-  int cancelled = 0;
   for (;;) {
-    if (src->cancelled && src->cancelled(src->ctx)) {
+    if (stop_asked(src)) {
       cancelled = 1;
       break;
     }
     wslot *s = &slots[slot];
     int n = read_full(src, s->buf, (int)chunk);
     if (n < 0) {
+      // Une lecture coupée par Arrêter n'est pas une erreur de l'original.
+      if (stop_asked(src)) {
+        cancelled = 1;
+        break;
+      }
       seterr(err, errlen, "Lecture de l'original interrompue");
       result = PGS_TRANSFER;
       break;
     }
     if (n == 0) break;
+    MD5Update(&md5, s->buf, (unsigned)n);
     // DEPTH+1 tampons : on remplit le suivant pendant que les DEPTH autres sont en vol.
     while (count >= PGS_DEPTH) {
       wslot *h = &slots[fifo[head]];
-      int rc = service_until(c, &h->done);
+      int rc = service_until(c, &h->done, src);
+      if (rc == -ECANCELED) {
+        cancelled = 1;
+        aborted = 1;
+        goto drain;
+      }
       if (rc < 0) {
         result = fail(c, rc, err, errlen);
         goto drain;
@@ -626,8 +714,14 @@ drain:
   // Les écritures déjà parties doivent revenir avant qu'on rende les tampons.
   while (count > 0) {
     wslot *h = &slots[fifo[head]];
-    if (c->smb2 == NULL) break;
-    int rc = service_until(c, &h->done);
+    if (c->smb2 == NULL || aborted) break;
+    int rc = service_until(c, &h->done, src);
+    if (rc == -ECANCELED) {
+      // Le PC ne confirme pas assez vite après Arrêter : on n'attend plus.
+      cancelled = 1;
+      aborted = 1;
+      break;
+    }
     if (rc < 0) {
       if (result == PGS_OK) result = fail(c, rc, err, errlen);
       break;
@@ -647,10 +741,12 @@ drain:
     count--;
   }
   if (count > 0) {
-    // Plus de connexion : on la ferme avant de libérer les tampons encore référencés.
+    // Plus de connexion, ou plus le temps d'attendre : on la ferme avant de libérer les tampons
+    // encore référencés.
     kill_conn(c);
     fh = NULL;
   }
+  if (acked > on_pc) on_pc = acked;
   if (result == PGS_OK && cancelled) {
     seterr(err, errlen, "Arrêté");
     result = PGS_CANCELLED;
@@ -685,13 +781,19 @@ drain:
     }
     renamed = 1;
   }
+  if (md5_out != NULL) {
+    unsigned char digest[16];
+    MD5Final(digest, &md5);
+    hex(digest, 16, md5_out);
+  }
 
 out:
   if (opened) src->close(src->ctx);
   if (c->smb2 != NULL && sock_ok(c->smb2)) {
     if (fh != NULL) smb2_close(c->smb2, fh);
-    // On garde un « .part » repris plus tard seulement s'il vaut la peine.
-    if (!renamed && !(resumable && acked >= PGS_RESUME_MIN)) smb2_unlink(c->smb2, part);
+    // On garde un « .part » repris plus tard seulement s'il vaut la peine. Un « .part » qu'on n'a
+    // pas pu ouvrir (ouvert ailleurs) n'est pas à nous : on n'y touche pas.
+    if (part_opened && !renamed && !(resumable && on_pc >= PGS_RESUME_MIN)) smb2_unlink(c->smb2, part);
   }
   for (int i = 0; i <= PGS_DEPTH; i++) free(slots[i].buf);
   free(part);
@@ -701,15 +803,6 @@ out:
 }
 
 // ------------------------------------------------------------------ Vérification
-
-static void hex(const unsigned char *d, int n, char *out) {
-  static const char digits[] = "0123456789abcdef";
-  for (int i = 0; i < n; i++) {
-    out[2 * i] = digits[d[i] >> 4];
-    out[2 * i + 1] = digits[d[i] & 15];
-  }
-  out[2 * n] = 0;
-}
 
 int pgs_md5_remote(pgs_conn *c, const char *path, int64_t size, int (*cancelled)(void *), void *ctx,
                    char out[64], char *err, size_t errlen) {

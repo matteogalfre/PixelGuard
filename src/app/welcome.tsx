@@ -5,7 +5,7 @@ import { Pressable, Share, Text, View } from 'react-native';
 import { pairFromCode } from '../engine';
 import { lang, t } from '../i18n';
 import { parsePairing } from '../logic';
-import { usePrepServer } from '../prepServer';
+import { prepFingerprint, usePrepServer } from '../prepServer';
 import { errorMessage } from '../native';
 import { useApp } from '../state';
 import { newPcId } from '../store';
@@ -81,9 +81,12 @@ export default function Welcome() {
           {step === 0 ? t.welPhotosText : step === 1 ? (prepAddress ? t.welPcLocal : t.welPcText) : t.welAlbumsText}
         </Text>
         {step === 1 && prepAddress ? (
-          <Text selectable accessibilityLabel={prepAddress} style={[ty.h2, { color: C.accent, fontFamily: F.black, textAlign: 'center' }]}>
-            {prepAddress}
-          </Text>
+          <>
+            <Text selectable accessibilityLabel={prepAddress} style={[ty.h2, { color: C.accent, fontFamily: F.black, textAlign: 'center' }]}>
+              {prepAddress}
+            </Text>
+            <Text selectable style={[ty.hint, { textAlign: 'center' }]}>{t.prepPrint(prepFingerprint)}</Text>
+          </>
         ) : null}
       </View>
 

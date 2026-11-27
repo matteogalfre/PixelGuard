@@ -46,7 +46,9 @@ public final class PgNativeModule: Module {
   private let watch = LibraryWatch()
   private let cancelled = Flag()
   private let resume = ResumeStore()
-  private let bgLock = NSLock()
+  /** Le petit serveur web : démarrer et arrêter passent un par un, dans l'ordre des appels. */
+  private let prep = DispatchQueue(label: "pixelguard.prep", qos: .userInitiated)
+  /** Lu et écrit seulement sur le fil principal. */
   private var bgTask: UIBackgroundTaskIdentifier = .invalid
 
   public func definition() -> ModuleDefinition {
@@ -124,8 +126,9 @@ public final class PgNativeModule: Module {
       self.run(promise) { try self.upload(uri, remotePath, Int64(size), transferId, sourceKey) }
     }
 
-    AsyncFunction("verify") { (uri: String, remotePath: String, size: Double, promise: Promise) in
-      self.run(promise) { try self.verify(uri, remotePath, Int64(size)) }
+    // `expectedMd5` : le MD5 rendu par upload. Donné, on ne relit pas l'original du téléphone.
+    AsyncFunction("verify") { (uri: String, remotePath: String, size: Double, expectedMd5: String?, promise: Promise) in
+      self.run(promise) { try self.verify(uri, remotePath, Int64(size), expectedMd5 ?? "") }
     }
 
     Function("cancel") { self.cancelled.set(true) }
@@ -174,17 +177,18 @@ public final class PgNativeModule: Module {
 
     // Le téléphone donne « Prepare my PC » au navigateur du PC, le temps de la préparation.
     AsyncFunction("startPrepServer") { (pages: [ServedPageRecord], promise: Promise) in
-      self.run(promise) {
+      self.run(promise, on: self.prep) {
         pgh_stop()
         pgh_clear()
         for p in pages {
           let bytes = Array(p.body.utf8)
-          _ = bytes.withUnsafeBufferPointer { buf in pgh_add(p.path, p.type, p.download, buf.baseAddress, buf.count) }
+          let rc = bytes.withUnsafeBufferPointer { buf in pgh_add(p.path, p.type, p.download, buf.baseAddress, buf.count) }
+          if rc < 0 { throw PgError("SERVER", "Page refusée par le petit serveur : \(p.path)") }
         }
-        let port = pgh_start(8800)
-        if port < 0 { throw PgError("SERVER", "Impossible de proposer le fichier sur le Wi-Fi") }
+        // Le serveur n'écoute que sur l'adresse du Wi-Fi, et c'est celle-là qu'on montre.
         var ip = [CChar](repeating: 0, count: 64)
-        pgh_local_ipv4(&ip, ip.count)
+        let port = pgh_start(8800, &ip, ip.count)
+        if port < 0 { throw PgError("SERVER", "Impossible de proposer le fichier sur le Wi-Fi") }
         let address = String(cString: ip)
         let result: [String: Any] = ["ip": address.isEmpty ? (NSNull() as Any) : (address as Any), "port": Int(port)]
         return result
@@ -192,22 +196,22 @@ public final class PgNativeModule: Module {
     }
 
     AsyncFunction("stopPrepServer") { (promise: Promise) in
-      self.run(promise) {
+      self.run(promise, on: self.prep) {
         pgh_stop()
         return true
       }
     }
 
     OnDestroy {
-      pgh_stop()
+      self.prep.async { pgh_stop() }
       self.endBackground()
       self.smb.closeAll()
     }
   }
 
   // Les appels SMB et PhotoKit bloquent : ils tournent sur une file à part, jamais sur le JS.
-  private func run(_ promise: Promise, _ body: @escaping () throws -> Any?) {
-    work.async {
+  private func run(_ promise: Promise, on queue: DispatchQueue? = nil, _ body: @escaping () throws -> Any?) {
+    (queue ?? work).async {
       do {
         promise.resolve(try body())
       } catch let e as PgError {
@@ -225,9 +229,14 @@ public final class PgNativeModule: Module {
   private func upload(_ uri: String, _ remotePath: String, _ size: Int64, _ transferId: String, _ sourceKey: String) throws -> [String: Any] {
     if cancelled.get() { throw PgError("CANCELLED", "Arrêté") }
     let reader = try gallery.reader(for: uri)
+    // Une lecture qui attend PhotoKit rend la main dès Arrêter.
+    reader.isCancelled = { [cancelled] in cancelled.get() }
     let key = resume.key(smb.targetKey(), remotePath)
-    // Seul un « .part » écrit par ce même original peut être repris.
-    let mayResume = resume.claim(key, sourceKey)
+    // Sous 8 Mo (PGS_RESUME_MIN), un envoi coupé ne garde pas de « .part » : rien à noter, les
+    // photos ne touchent jamais au disque du téléphone. Seul un « .part » écrit par ce même
+    // original peut être repris.
+    let tracked = size >= ResumeStore.minSize
+    let mayResume = tracked && resume.claim(key, sourceKey)
     var lastEmit = 0.0
     let box = TransferBox(source: reader, cancelled: { [cancelled] in cancelled.get() }) { [weak self] bytes in
       let now = CACurrentMediaTime()
@@ -237,19 +246,31 @@ public final class PgNativeModule: Module {
       }
     }
     do {
-      let sent = try smb.upload(box, remotePath, size, keep: true, mayResume: mayResume)
-      resume.forget(key)
+      let (sent, md5) = try smb.upload(box, remotePath, size, keep: true, mayResume: mayResume)
+      if tracked { resume.forget(key) }
       sendEvent("onProgress", ["id": transferId, "bytes": Double(sent)])
-      return ["bytes": Double(sent)]
+      // Le MD5 de l'original tel qu'envoyé : « Libérer de la place » n'aura pas à le relire.
+      return ["bytes": Double(sent), "md5": md5]
     } catch let e as PgError {
-      // Arrêt ou coupure : on garde la trace du « .part » pour reprendre ; sinon on l'oublie.
-      if e.code != "CANCELLED" && e.code != "CONNECTION" { resume.forget(key) }
+      // Arrêt ou coupure : on garde la trace du « .part » pour reprendre.
+      // BUSY : le PC tient encore le « .part » ouvert. S'il était à nous (envoi coupé à l'instant),
+      // la trace reste pour reprendre ; sinon il est à un autre appareil, on ne le revendique pas.
+      // Tout autre échec : on l'oublie.
+      let keepTrace = e.code == "CANCELLED" || e.code == "CONNECTION" || (e.code == "BUSY" && mayResume)
+      if tracked && !keepTrace { resume.forget(key) }
       throw e
     }
   }
 
-  // Relit la copie du PC et la compare à l'original du téléphone.
-  private func verify(_ uri: String, _ remotePath: String, _ size: Int64) throws -> [String: Any] {
+  /**
+   * Compare la copie du PC à l'original. Avec `expectedMd5` (rendu par upload), seul le MD5 du PC
+   * est calculé, l'original n'est pas relu ; sans, on relit l'original du téléphone.
+   */
+  private func verify(_ uri: String, _ remotePath: String, _ size: Int64, _ expectedMd5: String) throws -> [String: Any] {
+    if !expectedMd5.isEmpty {
+      let remote = try smb.md5Remote(remotePath, size, cancelled: cancelled)
+      return ["same": remote == expectedMd5.lowercased(), "local": expectedMd5, "remote": remote ?? NSNull(), "missing": remote == nil]
+    }
     let local = try gallery.md5(uri, cancelled: { [cancelled] in cancelled.get() })
     let remote = try smb.md5Remote(remotePath, size, cancelled: cancelled)
     return ["same": local == remote, "local": local, "remote": remote ?? NSNull(), "missing": remote == nil]
@@ -263,7 +284,7 @@ public final class PgNativeModule: Module {
       self?.sendEvent("onProgress", ["id": "speed", "bytes": Double(done)])
     }
     let start = CACurrentMediaTime()
-    _ = try smb.upload(box, target, bytes, keep: false, mayResume: false)
+    _ = try smb.upload(box, target, bytes, keep: false, mayResume: false, md5: false)
     let seconds = CACurrentMediaTime() - start
     let info = smb.info()
     return [
@@ -277,28 +298,30 @@ public final class PgNativeModule: Module {
     ]
   }
 
+  // Début et fin passent par la file principale, dans l'ordre des appels : une fin ne peut pas
+  // doubler le début qu'elle doit clore.
   private func beginBackground() {
-    Task { @MainActor in
-      self.bgLock.lock()
-      defer { self.bgLock.unlock() }
+    DispatchQueue.main.async {
       if self.bgTask != .invalid { return }
-      self.bgTask = UIApplication.shared.beginBackgroundTask(withName: "pixelguard-backup") { [weak self] in
-        guard let self else { return }
+      self.bgTask = UIApplication.shared.beginBackgroundTask(withName: "pixelguard-backup") {
+        // iOS appelle ce gestionnaire sur le fil principal, et veut la fin avant qu'il ne rende la
+        // main : on arrête l'envoi et on clôt tout de suite, sans repasser par la file.
         self.cancelled.set(true)
         self.sendEvent("onStopRequested", ["reason": "background"])
-        self.endBackground()
+        self.endBackgroundNow()
       }
     }
   }
 
   private func endBackground() {
-    Task { @MainActor in
-      self.bgLock.lock()
-      defer { self.bgLock.unlock() }
-      if self.bgTask == .invalid { return }
-      UIApplication.shared.endBackgroundTask(self.bgTask)
-      self.bgTask = .invalid
-    }
+    DispatchQueue.main.async { self.endBackgroundNow() }
+  }
+
+  /** Sur le fil principal seulement. */
+  private func endBackgroundNow() {
+    if bgTask == .invalid { return }
+    UIApplication.shared.endBackgroundTask(bgTask)
+    bgTask = .invalid
   }
 }
 
@@ -321,8 +344,13 @@ enum Store {
 
 /** Quel original a écrit chaque « .part » encore sur un PC : on ne reprend que celui-là. */
 final class ResumeStore {
+  /** Même seuil que PGS_RESUME_MIN dans PgSmb.h : en dessous, pas de reprise. */
+  static let minSize: Int64 = 8 << 20
+
   private let lock = NSLock()
   private let url = Store.file("resume.json")
+  // Lue une fois, gardée en mémoire ; seul un vrai changement réécrit le fichier.
+  private var cache: [String: String]?
 
   func key(_ target: String, _ remotePath: String) -> String {
     var p = remotePath.replacingOccurrences(of: "/", with: "\\")
@@ -331,12 +359,18 @@ final class ResumeStore {
   }
 
   private func load() -> [String: String] {
+    if let cache { return cache }
     guard let data = try? Data(contentsOf: url),
-          let map = try? JSONSerialization.jsonObject(with: data) as? [String: String] else { return [:] }
+          let map = try? JSONSerialization.jsonObject(with: data) as? [String: String] else {
+      cache = [:]
+      return [:]
+    }
+    cache = map
     return map
   }
 
   private func save(_ map: [String: String]) {
+    cache = map
     if let data = try? JSONSerialization.data(withJSONObject: map) { try? data.write(to: url, options: .atomic) }
   }
 
@@ -346,8 +380,10 @@ final class ResumeStore {
     defer { lock.unlock() }
     var map = load()
     let ours = map[key] == sourceKey
-    map[key] = sourceKey
-    save(map)
+    if !ours {
+      map[key] = sourceKey
+      save(map)
+    }
     return ours
   }
 

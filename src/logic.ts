@@ -307,8 +307,12 @@ export function pickShare(shares: string[]): string {
   );
 }
 
-/** Une copie connue sur le PC : son chemin dans le partage et sa taille. */
-export type IndexEntry = { path: string; size: number };
+/**
+ * Une copie connue sur le PC : son chemin dans le partage et sa taille. Quand c'est l'appli qui
+ * l'a envoyée : `md5` de l'original envoyé et `mod`, sa date de modification à ce moment-là.
+ * Tant que l'original n'a pas changé, « Libérer de la place » ne relit que la copie du PC.
+ */
+export type IndexEntry = { path: string; size: number; md5?: string; mod?: number };
 export type CopyIndex = Record<string, IndexEntry>;
 
 /**
@@ -381,3 +385,21 @@ export function parsePairing(text: string): Pairing | null {
   return pairingFrom(q);
 }
 
+
+// ---------------------------------------------------------------- PC qui change d'adresse
+
+/** Seulement pour un PC appairé par son adresse IPv4 et dont on connaît le nom (un nom se résout tout seul). */
+export function canRelocate(host: string, identity: string | undefined): boolean {
+  return !!identity?.trim() && /^\d{1,3}(\.\d{1,3}){3}$/.test(host.trim());
+}
+
+/**
+ * La nouvelle adresse du PC parmi ceux trouvés sur le Wi-Fi : un seul qui annonce le même nom, à
+ * une autre adresse. Deux PC du même nom, ou aucun : on ne devine pas.
+ */
+export function movedTo(found: { ip: string; name: string }[], host: string, identity: string): string | null {
+  const name = identity.trim().toUpperCase();
+  const same = found.filter((f) => f.name.trim().toUpperCase() === name);
+  if (same.length !== 1 || same[0].ip === host.trim()) return null;
+  return same[0].ip;
+}

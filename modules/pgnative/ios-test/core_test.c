@@ -1,5 +1,6 @@
 // Teste PgSmb.c (le cœur SMB de l'iPhone) sur le Mac, contre le serveur SMB local d'impacket.
 // Mêmes cas que jvm-test/CoreTest.java, plus trois envois en parallèle sur trois connexions.
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
@@ -11,6 +12,8 @@
 
 #include "../ios/PgSmb.h"
 #include "md5.h"
+#include "smb2.h"
+#include "libsmb2.h"
 
 static const char *SERVER = "127.0.0.1:4445";
 static const char *SHARE_DIR;
@@ -22,7 +25,11 @@ typedef struct {
   int calls;
   int cancel_after_calls;     // 0 : jamais
   int64_t cancel_after_bytes; // 0 : jamais
+  int cancel_now;             // Arrêter déjà appuyé
   int opens;
+  pid_t freeze_pid;           // serveur à figer (SIGSTOP) après freeze_after octets confirmés
+  int64_t freeze_after;
+  double frozen_at;           // 0 : pas encore figé
 } memsrc;
 
 static int m_open(void *ctx) {
@@ -40,14 +47,22 @@ static int m_read(void *ctx, uint8_t *buf, int max) {
   return (int)n;
 }
 static void m_close(void *ctx) { (void)ctx; }
+static double now(void);
 static void m_progress(void *ctx, int64_t done) {
   memsrc *m = ctx;
   if (m->first < 0) m->first = done;
   m->last = done;
   m->calls++;
+  if (m->freeze_pid && m->frozen_at == 0 && done >= m->freeze_after) {
+    kill(m->freeze_pid, SIGSTOP); // le PC ne répond plus du tout
+    m->frozen_at = now();
+  }
 }
 static int m_cancelled(void *ctx) {
   memsrc *m = ctx;
+  if (m->cancel_now) return 1;
+  // Arrêter, une demi-seconde après que le PC s'est figé.
+  if (m->frozen_at > 0 && now() - m->frozen_at > 0.5) return 1;
   if (m->cancel_after_calls && m->calls > m->cancel_after_calls) return 1;
   if (m->cancel_after_bytes && m->last > m->cancel_after_bytes) return 1;
   return 0;
@@ -144,7 +159,7 @@ static void *parallel_worker(void *arg) {
     memsrc m;
     pgs_source s = source(&m, d, len);
     int64_t sent;
-    int rc = pgs_upload(c, &s, path, len, 1, 0, &sent, err, sizeof(err));
+    int rc = pgs_upload(c, &s, path, len, 1, 0, &sent, NULL, err, sizeof(err));
     char rel[160];
     snprintf(rel, sizeof(rel), "Tel/Parallele/P%d_%d.jpg", w->id, i);
     if (rc != PGS_OK || !same_on_disk(rel, d, len)) ok = 0;
@@ -238,9 +253,12 @@ int main(int argc, char **argv) {
   memsrc m;
   pgs_source s = source(&m, data, len);
   int64_t sent;
+  char up_md5[33] = "", want_md5[33];
   double t = now();
-  rc = pgs_upload(c, &s, "Tel/2026 Novembre/IMG_1.jpg", len, 1, 0, &sent, err, sizeof(err));
+  rc = pgs_upload(c, &s, "Tel/2026 Novembre/IMG_1.jpg", len, 1, 0, &sent, up_md5, err, sizeof(err));
   double sec = now() - t;
+  md5hex(data, len, want_md5);
+  printf("md5 rendu par l'envoi = md5 du fichier : %s\n", strcmp(up_md5, want_md5) == 0 ? "ok" : "DIFFÉRENT");
   printf("envoi=%lld octets (rc=%d %s), progression=%d appels (dernier %lld), %.1f Mo/s\n", (long long)sent, rc,
          rc ? err : "", m.calls, (long long)m.last, sent / sec / 1e6);
   printf("identique sur disque=%d, .part restant=%d\n", same_on_disk("Tel/2026 Novembre/IMG_1.jpg", data, len),
@@ -265,13 +283,13 @@ int main(int argc, char **argv) {
   printf(" mauvaise taille=%s\n", remote);
 
   s = source(&m, data, len);
-  rc = pgs_upload(c, &s, "Tel/2026 Novembre/IMG_1.jpg", len, 1, 0, &sent, err, sizeof(err));
+  rc = pgs_upload(c, &s, "Tel/2026 Novembre/IMG_1.jpg", len, 1, 0, &sent, NULL, err, sizeof(err));
   printf("collision %s: %s\n", rc == PGS_EXISTS ? "détectée" : "NON détectée", err);
   printf("après collision, .part restant=%d\n", exists("Tel/2026 Novembre/IMG_1.jpg.part"));
 
   s = source(&m, data, len);
   m.cancel_after_calls = 3;
-  rc = pgs_upload(c, &s, "Tel/2026 Novembre/IMG_2.jpg", len, 1, 0, &sent, err, sizeof(err));
+  rc = pgs_upload(c, &s, "Tel/2026 Novembre/IMG_2.jpg", len, 1, 0, &sent, NULL, err, sizeof(err));
   printf("arrêt %s, fichier=%d part=%d\n", rc == PGS_CANCELLED ? "ok" : "NON pris en compte",
          exists("Tel/2026 Novembre/IMG_2.jpg"), exists("Tel/2026 Novembre/IMG_2.jpg.part"));
 
@@ -279,7 +297,7 @@ int main(int argc, char **argv) {
   uint8_t *noise = random_bytes(sz, 1);
   s = source(&m, noise, sz);
   t = now();
-  rc = pgs_upload(c, &s, "Tel/.pixelguard-vitesse", sz, 0, 0, &sent, err, sizeof(err));
+  rc = pgs_upload(c, &s, "Tel/.pixelguard-vitesse", sz, 0, 0, &sent, NULL, err, sizeof(err));
   sec = now() - t;
   printf("test de vitesse 64 Mo: %.1f Mo/s (rc=%d), fichier restant=%d\n", sz / sec / 1e6, rc,
          exists("Tel/.pixelguard-vitesse.part") || exists("Tel/.pixelguard-vitesse"));
@@ -291,13 +309,15 @@ int main(int argc, char **argv) {
   const char *big_path = "Tel/2026 Novembre/VID_1.mp4";
   s = source(&m, big, blen);
   m.cancel_after_bytes = 12LL << 20;
-  rc = pgs_upload(c, &s, big_path, blen, 1, 1, &sent, err, sizeof(err));
+  rc = pgs_upload(c, &s, big_path, blen, 1, 1, &sent, NULL, err, sizeof(err));
   printf("coupé (rc=%d), .part gardé=%d (%lld Mo)\n", rc, exists("Tel/2026 Novembre/VID_1.mp4.part"),
          disk_size("Tel/2026 Novembre/VID_1.mp4.part") / 1048576);
   s = source(&m, big, blen);
-  rc = pgs_upload(c, &s, big_path, blen, 1, 1, &sent, err, sizeof(err));
-  printf("repris à %lld Mo (rc=%d), identique=%d, .part restant=%d\n", (long long)(m.first / 1048576), rc,
-         same_on_disk(big_path, big, blen), exists("Tel/2026 Novembre/VID_1.mp4.part"));
+  rc = pgs_upload(c, &s, big_path, blen, 1, 1, &sent, up_md5, err, sizeof(err));
+  md5hex(big, blen, want_md5);
+  printf("repris à %lld Mo (rc=%d), identique=%d, .part restant=%d, md5 rendu=md5 du fichier : %s\n",
+         (long long)(m.first / 1048576), rc, same_on_disk(big_path, big, blen),
+         exists("Tel/2026 Novembre/VID_1.mp4.part"), strcmp(up_md5, want_md5) == 0 ? "ok" : "DIFFÉRENT");
 
   // Un .part écrit par un autre original : on repart de zéro, même si ses 64 derniers Ko ressemblent.
   uint8_t *other = malloc((size_t)blen);
@@ -306,24 +326,25 @@ int main(int argc, char **argv) {
   const char *other_path = "Tel/2026 Novembre/VID_2.mp4";
   s = source(&m, other, blen);
   m.cancel_after_bytes = 12LL << 20;
-  pgs_upload(c, &s, other_path, blen, 1, 1, &sent, err, sizeof(err));
+  pgs_upload(c, &s, other_path, blen, 1, 1, &sent, NULL, err, sizeof(err));
   s = source(&m, big, blen);
-  rc = pgs_upload(c, &s, other_path, blen, 1, 0, &sent, err, sizeof(err));
+  rc = pgs_upload(c, &s, other_path, blen, 1, 0, &sent, NULL, err, sizeof(err));
   printf(".part différent : reparti de %lld (rc=%d), identique=%d\n", (long long)m.first, rc,
          same_on_disk(other_path, big, blen));
   // Même original mais octets différents avant les 64 derniers Ko : reprise refusée au contrôle.
   s = source(&m, other, blen);
   m.cancel_after_bytes = 12LL << 20;
-  pgs_upload(c, &s, "Tel/2026 Novembre/VID_3.mp4", blen, 1, 1, &sent, err, sizeof(err));
+  pgs_upload(c, &s, "Tel/2026 Novembre/VID_3.mp4", blen, 1, 1, &sent, NULL, err, sizeof(err));
   uint8_t *third = malloc((size_t)blen);
   memcpy(third, other, (size_t)blen);
   long long cut = disk_size("Tel/2026 Novembre/VID_3.mp4.part");
   // juste avant le point de reprise (fin - DEPTH × CHUNK), dans les 64 Ko contrôlés
   third[cut - (long long)PGS_DEPTH * PGS_CHUNK - 1000] ^= 1;
   s = source(&m, third, blen);
-  rc = pgs_upload(c, &s, "Tel/2026 Novembre/VID_3.mp4", blen, 1, 1, &sent, err, sizeof(err));
-  printf("avant le point de reprise différent : reparti de %lld (rc=%d), identique=%d\n", (long long)m.first, rc,
-         same_on_disk("Tel/2026 Novembre/VID_3.mp4", third, blen));
+  rc = pgs_upload(c, &s, "Tel/2026 Novembre/VID_3.mp4", blen, 1, 1, &sent, up_md5, err, sizeof(err));
+  md5hex(third, blen, want_md5);
+  printf("avant le point de reprise différent : reparti de %lld (rc=%d), identique=%d, md5 : %s\n", (long long)m.first, rc,
+         same_on_disk("Tel/2026 Novembre/VID_3.mp4", third, blen), strcmp(up_md5, want_md5) == 0 ? "ok" : "DIFFÉRENT");
 
   // Un .part avec un trou avant la fin (écritures en vol perdues à la coupure) : on reprend
   // 4 Mo plus tôt, donc le trou est réécrit.
@@ -338,30 +359,74 @@ int main(int argc, char **argv) {
     fclose(hf);
     free(holed);
     s = source(&m, big, blen);
-    rc = pgs_upload(c, &s, hole_path, blen, 1, 1, &sent, err, sizeof(err));
-    printf("trou avant la fin : repris à %lld Mo (rc=%d), identique=%d\n", (long long)(m.first / 1048576), rc,
-           same_on_disk(hole_path, big, blen));
+    rc = pgs_upload(c, &s, hole_path, blen, 1, 1, &sent, up_md5, err, sizeof(err));
+    md5hex(big, blen, want_md5);
+    printf("trou avant la fin : repris à %lld Mo (rc=%d), identique=%d, md5 : %s\n", (long long)(m.first / 1048576), rc,
+           same_on_disk(hole_path, big, blen), strcmp(up_md5, want_md5) == 0 ? "ok" : "DIFFÉRENT");
+  }
+
+  // Arrêter pendant la relecture du début d'une reprise : on s'arrête tout de suite, et le .part
+  // reste pour la fois suivante.
+  {
+    const char *stop_path = "Tel/2026 Novembre/VID_6.mp4";
+    s = source(&m, big, blen);
+    m.cancel_after_bytes = 12LL << 20;
+    pgs_upload(c, &s, stop_path, blen, 1, 1, &sent, NULL, err, sizeof(err));
+    long long kept = disk_size("Tel/2026 Novembre/VID_6.mp4.part");
+    s = source(&m, big, blen);
+    m.cancel_now = 1;
+    rc = pgs_upload(c, &s, stop_path, blen, 1, 1, &sent, NULL, err, sizeof(err));
+    printf("arrêt pendant la relecture d'une reprise : rc=%s, lu=%lld octets, .part gardé=%d (%lld Mo)\n",
+           rc == PGS_CANCELLED ? "CANCELLED, ok" : "AUTRE", (long long)m.pos,
+           disk_size("Tel/2026 Novembre/VID_6.mp4.part") == kept, kept / 1048576);
+  }
+
+  // Un .part encore ouvert par une autre session (autre téléphone, ou envoi coupé que Windows
+  // n'a pas encore lâché) : BUSY, et le .part n'est pas touché.
+  {
+    struct smb2_context *other_smb = smb2_init_context();
+    smb2_set_user(other_smb, "test");
+    smb2_set_password(other_smb, "test");
+    smb2_set_security_mode(other_smb, SMB2_NEGOTIATE_SIGNING_ENABLED);
+    smb2_set_sign(other_smb, 1);
+    struct smb2fh *held = NULL;
+    if (smb2_connect_share(other_smb, SERVER, "PHOTOS", NULL) == 0) {
+      held = smb2_open(other_smb, "Tel\\2026 Novembre\\IMG_9.jpg.part", O_RDWR | O_CREAT);
+      if (held) smb2_pwrite(other_smb, held, data, 1000, 0);
+    }
+    s = source(&m, data, len);
+    rc = pgs_upload(c, &s, "Tel/2026 Novembre/IMG_9.jpg", len, 1, 1, &sent, NULL, err, sizeof(err));
+    if (held == NULL) {
+      printf(".part ouvert ailleurs : pas pu l'ouvrir depuis une autre session (non vérifié)\n");
+    } else if (rc == PGS_BUSY) {
+      printf(".part ouvert ailleurs : BUSY, ok, .part intact=%d\n", disk_size("Tel/2026 Novembre/IMG_9.jpg.part") == 1000);
+    } else {
+      printf(".part ouvert ailleurs : rc=%d, le serveur de test n'applique pas les verrous de partage (BUSY non vérifiable ici)\n", rc);
+    }
+    if (held) smb2_close(other_smb, held);
+    smb2_disconnect_share(other_smb);
+    smb2_destroy_context(other_smb);
   }
 
   // Un petit fichier coupé ne laisse pas de .part (moins de 8 Mo : on recommence).
   s = source(&m, data, len);
   m.cancel_after_calls = 3;
-  rc = pgs_upload(c, &s, "Tel/2026 Novembre/IMG_3.jpg", len, 1, 1, &sent, err, sizeof(err));
+  rc = pgs_upload(c, &s, "Tel/2026 Novembre/IMG_3.jpg", len, 1, 1, &sent, NULL, err, sizeof(err));
   printf("petit fichier coupé (rc=%d), .part restant=%d\n", rc, exists("Tel/2026 Novembre/IMG_3.jpg.part"));
 
   // Taille annoncée fausse : refus, pas de faux fichier fini.
   s = source(&m, data, len);
-  rc = pgs_upload(c, &s, "Tel/2026 Novembre/IMG_4.jpg", len + 5, 1, 0, &sent, err, sizeof(err));
+  rc = pgs_upload(c, &s, "Tel/2026 Novembre/IMG_4.jpg", len + 5, 1, 0, &sent, NULL, err, sizeof(err));
   printf("taille fausse : rc=%d (%s), fichier=%d part=%d\n", rc, err, exists("Tel/2026 Novembre/IMG_4.jpg"),
          exists("Tel/2026 Novembre/IMG_4.jpg.part"));
 
   // Noms avec accents et espaces.
   s = source(&m, data, 1000);
-  rc = pgs_upload(c, &s, "Tel/2026 Février/Été à la mer (1).jpg", 1000, 1, 0, &sent, err, sizeof(err));
+  rc = pgs_upload(c, &s, "Tel/2026 Février/Été à la mer (1).jpg", 1000, 1, 0, &sent, NULL, err, sizeof(err));
   if (rc == PGS_UNREACHABLE) printf("?");
   pgs_mkdirs(c, "Tel/2026 Février", err, sizeof(err));
   s = source(&m, data, 1000);
-  rc = pgs_upload(c, &s, "Tel/2026 Février/Été à la mer (1).jpg", 1000, 1, 0, &sent, err, sizeof(err));
+  rc = pgs_upload(c, &s, "Tel/2026 Février/Été à la mer (1).jpg", 1000, 1, 0, &sent, NULL, err, sizeof(err));
   printf("accents : rc=%d identique=%d\n", rc, same_on_disk("Tel/2026 Février/Été à la mer (1).jpg", data, 1000));
   pgs_close(c);
 
@@ -379,6 +444,31 @@ int main(int argc, char **argv) {
   }
   for (int i = 0; i < 3; i++) pthread_join(th[i], NULL);
   printf("trois envois en parallèle : %s\n", w[0].ok && w[1].ok && w[2].ok ? "ok" : "ÉCHEC");
+
+  // Le PC ne répond plus du tout (serveur figé) en plein envoi, puis Arrêter : on n'attend pas
+  // les 60 s de libsmb2 ni les 120 s du délai, on rend la main en 2 à 3 s.
+  if (argc > 3) {
+    pid_t frozen = (pid_t)atoi(argv[3]);
+    pgs_conn *fc = NULL;
+    rc = pgs_connect("127.0.0.1:4447", "PHOTOS", NULL, "test", "test", 1, &fc, err, sizeof(err));
+    if (rc == PGS_OK) {
+      pgs_mkdirs(fc, "Tel/Fige", err, sizeof(err));
+      int64_t flen = 48LL << 20;
+      uint8_t *fd = random_bytes(flen, 11);
+      s = source(&m, fd, flen);
+      m.freeze_pid = frozen;
+      m.freeze_after = 2LL << 20;
+      double t0 = now();
+      rc = pgs_upload(fc, &s, "Tel/Fige/VID_F.mp4", flen, 1, 1, &sent, NULL, err, sizeof(err));
+      double waited = m.frozen_at > 0 ? now() - m.frozen_at : now() - t0;
+      kill(frozen, SIGCONT);
+      printf("PC figé puis Arrêter : rc=%s, rendu %.1f s après le gel\n", rc == PGS_CANCELLED ? "CANCELLED, ok" : "AUTRE", waited);
+      pgs_close(fc);
+      free(fd);
+    } else {
+      printf("PC figé : connexion ratée (%s)\n", err);
+    }
+  }
 
   // Nom NetBIOS : réponse type d'un PC Windows (même vecteur que NbParse.java).
   uint8_t r[200];

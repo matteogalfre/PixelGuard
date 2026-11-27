@@ -9,7 +9,7 @@ import { humanBytes, joinPath, MONTHS, parsePairing, pickShare, type Lang, type 
 import { errorMessage, Pg, rawMessage, type FoundPc, type LoginInfo, type SpeedResult } from '../native';
 import { useApp } from '../state';
 import { takePendingPairing } from '../pairing';
-import { usePrepServer } from '../prepServer';
+import { prepFingerprint, usePrepServer } from '../prepServer';
 import { emptySettings, newPcId } from '../store';
 import { Icon, Bar, C, Card, F, Field, Header, MainButton, Screen, Segmented, Step, success, t as ty, tap } from '../ui/kit';
 import { QrScanner } from '../ui/QrScanner';
@@ -345,6 +345,7 @@ export default function PcEdit() {
                   <View style={{ paddingLeft: 34, gap: 4 }}>
                     <Text selectable accessibilityLabel={prepAddress} style={[ty.h2, { color: C.accent, fontFamily: F.black }]}>{prepAddress}</Text>
                     <Text style={ty.hint}>{t.prepWinLocalHint}</Text>
+                    <Text style={ty.hint} selectable>{t.prepPrint(prepFingerprint)}</Text>
                   </View>
                 ) : null}
                 <Pressable

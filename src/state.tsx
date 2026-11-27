@@ -1,8 +1,8 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AppState } from 'react-native';
 
 import { onPcIdentified, stats, type Preview, type Stats } from './engine';
-import { forgetGallery, galleryAlbums } from './gallery';
+import { forgetGallery, galleryAlbums, galleryEpoch } from './gallery';
 import type { Kinds, Period, Sorting } from './logic';
 import type { Album } from './native';
 import { openSettings, readAccess, widenAccess, type Access } from './permissions';
@@ -138,13 +138,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setExcluded(new Set());
   }, [selected, prefs.kinds, prefs.period, prefs.sorting, activeId]);
 
-  // De retour des réglages Android ou d'une autre appli : on relit l'accès et la galerie.
+  // De retour des réglages Android ou d'une autre appli : on relit l'accès, et les chiffres de
+  // l'accueil. La galerie n'est relue que si son compteur de changements a bougé (photos prises,
+  // accès changé) : sinon la copie en mémoire sert.
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
   useEffect(() => {
     const sub = AppState.addEventListener('change', async (state) => {
       if (state !== 'active') return;
-      // Photos prises ou sélection d'accès changée pendant ce temps : on relira la galerie.
-      forgetGallery();
       setAccess(await readAccess(false));
+      const before = galleryEpoch();
+      await refreshRef.current().catch(() => {});
+      // Nouvelles photos : l'ancienne comparaison avec le PC ne les connaît pas, on la refait.
+      if (galleryEpoch() !== before) setPreview(null);
     });
     return () => sub.remove();
   }, []);

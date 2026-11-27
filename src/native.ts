@@ -100,7 +100,7 @@ function demo(): PgApi {
         listeners.forEach((l) => l({ id, bytes: Math.min(sent, size) }));
       }
       remote.set(path, size);
-      return { bytes: size };
+      return { bytes: size, md5: 'demo' };
     },
     async verify(_uri, path) { await wait(30); return { same: remote.has(path), local: 'x', remote: 'x', missing: !remote.has(path) }; },
     cancel() { stop = true; },
@@ -153,6 +153,10 @@ export function errorMessage(e: unknown): string {
       return t.err.connection;
     case 'BUSY':
       return t.err.busy;
+    case 'CHANGED':
+      return t.err.changed;
+    case 'NO_WIFI':
+      return t.wifiOnly;
     case 'EXISTS':
       return t.err.exists;
     case 'CANCELLED':

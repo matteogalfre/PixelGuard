@@ -27,6 +27,7 @@ enum {
   PGS_NOT_FOUND = 9,
   PGS_NOT_ENCRYPTED = 10, // chiffrement exigé, mais le PC ne sait pas (SMB 2) ou refuse
   PGS_PC_CHANGED = 11,    // le PC annonce un autre nom que celui appairé : rien n'a été envoyé
+  PGS_BUSY = 12,          // le PC garde le « .part » ouvert (autre appareil, ou envoi coupé à l'instant)
 };
 
 /** Chiffrement demandé à pgs_connect2. */
@@ -104,9 +105,14 @@ typedef struct {
  * que ce « .part » vient de ce même original), un envoi coupé reprend là où il s'était arrêté,
  * après contrôle de ses 64 derniers Ko. Si `keep` vaut 0, le fichier est effacé à la fin (test
  * de vitesse). `sent` reçoit la taille écrite.
+ * `md5` (NULL : pas calculé) reçoit, si tout va bien, le MD5 en hexadécimal minuscule de tout
+ * l'original tel que lu et envoyé. En reprise, le début déjà sur le PC est relu et compté aussi.
+ * PGS_BUSY : le « .part » est ouvert ailleurs, il est laissé tel quel. Un PC qui ne répond plus
+ * (120 s) compte comme une coupure (PGS_CONNECTION). Arrêter est pris en compte même pendant
+ * qu'on attend le PC ou qu'on relit le début d'une reprise.
  */
 int pgs_upload(pgs_conn *c, pgs_source *src, const char *target, int64_t expected, int keep,
-               int may_resume, int64_t *sent, char *err, size_t errlen);
+               int may_resume, int64_t *sent, char md5[33], char *err, size_t errlen);
 
 /**
  * MD5 de la copie du PC (32 caractères hexadécimaux dans `out`). Si la copie n'a pas `size`

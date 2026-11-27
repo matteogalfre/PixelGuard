@@ -201,8 +201,10 @@ export async function loadIndex(pcId: string): Promise<CopyIndex> {
     indexCache.set(pcId, index);
     return { ...index };
   } catch {
-    // Illisible : on le met de côté au lieu de l'écraser au prochain enregistrement.
+    // Illisible : on le met de côté au lieu de l'écraser au prochain enregistrement, une seule
+    // fois (sinon chaque lecture en ferait une copie de plus).
     if (raw) await Pg.saveText(`${indexFile(pcId)}.illisible-${Date.now()}`, raw).catch(() => {});
+    indexCache.set(pcId, {});
     return {};
   }
 }

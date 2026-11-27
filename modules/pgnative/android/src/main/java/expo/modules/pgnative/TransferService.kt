@@ -21,8 +21,17 @@ class TransferService : Service() {
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    if (intent?.action == ACTION_FINISH) {
+      // Fin de la sauvegarde. Les intents arrivent dans l'ordre : celui du démarrage est déjà passé
+      // par startForeground, donc s'arrêter ici ne fait jamais planter l'appli (ce que ferait un
+      // stopService arrivé avant startForeground).
+      finish()
+      return START_NOT_STICKY
+    }
     if (intent?.action == ACTION_STOP) {
-      onStopRequested?.invoke("user")
+      val listener = onStopRequested
+      // Plus personne pour arrêter la sauvegarde (JS rechargé) : on libère tout nous-mêmes.
+      if (listener == null) finish() else listener("user")
       return START_NOT_STICKY
     }
     val title = intent?.getStringExtra(EXTRA_TITLE) ?: ""
@@ -37,9 +46,10 @@ class TransferService : Service() {
     } catch (e: Exception) {
       // Refusé (Android 15 : les 6 h du jour sont déjà prises) : la sauvegarde continue tant que
       // l'appli reste ouverte, sans service.
-      stopSelf()
+      finish()
       return START_NOT_STICKY
     }
+    active = true
     if (wakeLock == null) {
       val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
       wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "pixelguard:transfer").apply {
@@ -54,12 +64,24 @@ class TransferService : Service() {
   // sinon Android ferme l'appli. On arrête proprement la sauvegarde, qui pourra reprendre.
   override fun onTimeout(startId: Int, fgsType: Int) {
     onStopRequested?.invoke("timeout")
+    finish()
+  }
+
+  /** Quitte le premier plan, retire la notification « en cours » et s'arrête. */
+  private fun finish() {
+    active = false
+    try {
+      stopForeground(Service.STOP_FOREGROUND_REMOVE)
+    } catch (_: Exception) {}
+    getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
     stopSelf()
   }
 
   override fun onDestroy() {
+    active = false
     try { wakeLock?.release() } catch (_: Exception) {}
     wakeLock = null
+    getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
     super.onDestroy()
   }
 
@@ -68,6 +90,7 @@ class TransferService : Service() {
     const val NOTIFICATION_ID = 4711
     const val DONE_ID = 4712
     const val ACTION_STOP = "expo.modules.pgnative.STOP"
+    const val ACTION_FINISH = "expo.modules.pgnative.FINISH"
     const val EXTRA_TITLE = "title"
     const val EXTRA_TEXT = "text"
 
@@ -76,11 +99,13 @@ class TransferService : Service() {
     var onStopRequested: ((String) -> Unit)? = null
     var stopLabel: String = "Stop"
 
-    fun ensureChannel(context: Context, name: String) {
+    /** Vrai seulement quand le service tient vraiment le premier plan : la notification suit. */
+    @Volatile var active = false
+
+    /** Même nom quelle que soit l'opération (sauvegarde ou vérification) qui l'a créé. */
+    fun ensureChannel(context: Context) {
       val nm = context.getSystemService(NotificationManager::class.java)
-      if (nm.getNotificationChannel(CHANNEL) == null) {
-        nm.createNotificationChannel(NotificationChannel(CHANNEL, name, NotificationManager.IMPORTANCE_LOW))
-      }
+      nm.createNotificationChannel(NotificationChannel(CHANNEL, "PixelGuard", NotificationManager.IMPORTANCE_LOW))
     }
 
     fun build(context: Context, title: String, text: String, progress: Int, max: Int, ongoing: Boolean): Notification {

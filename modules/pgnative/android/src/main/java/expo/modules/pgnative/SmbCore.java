@@ -82,6 +82,10 @@ public final class SmbCore {
     return config(encrypt, new Pin(""));
   }
 
+  public static SmbConfig config(boolean encrypt, Pin pin) {
+    return config(encrypt, pin, true, null);
+  }
+
   /**
    * Le nom NetBIOS que le PC annonce dans son défi NTLM (`seen`), et celui qu'il doit annoncer
    * (`expected`, vide : pas de contrôle). Windows change d'identifiant SMB à chaque démarrage,
@@ -172,8 +176,17 @@ public final class SmbCore {
     }
   }
 
-  public static SmbConfig config(boolean encrypt, Pin pin) {
-    return SmbConfig.builder()
+  /**
+   * `signing` : signature exigée (tout sauf l'invité, qui n'a pas de clé de session). Sans elle,
+   * un PC qui ne l'exige pas (Windows 10, Mac) accepterait des échanges non signés quand le
+   * chiffrement est coupé : quelqu'un sur le réseau pourrait fausser la copie puis la relecture
+   * MD5. `sockets` : les sockets du réseau Wi-Fi (null : réseau par défaut).
+   */
+  public static SmbConfig config(boolean encrypt, Pin pin, boolean signing, javax.net.SocketFactory sockets) {
+    SmbConfig.Builder b = SmbConfig.builder();
+    if (sockets != null) b.withSocketFactory(sockets);
+    return b
+        .withSigningRequired(signing)
         .withAuthenticators(new Factory.Named<Authenticator>() {
           @Override
           public String getName() {
@@ -286,7 +299,8 @@ public final class SmbCore {
       if (c instanceof RuntimeException) throw (RuntimeException) c;
       throw new IOException(c);
     } catch (java.util.concurrent.TimeoutException e) {
-      throw new IOException("Le PC ne répond plus");
+      // Une coupure comme une autre : le « .part » est gardé et l'envoi reprendra.
+      throw new com.hierynomus.protocol.transport.TransportException("Le PC ne répond plus");
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new Cancelled();
@@ -303,6 +317,16 @@ public final class SmbCore {
   private static final int RESUME_PROBE = 64 * 1024;
 
   private static void skipFully(InputStream in, long n) throws IOException {
+    if (in instanceof java.security.DigestInputStream) {
+      // L'empreinte doit couvrir tout l'original : on lit ce qu'on aurait sauté.
+      byte[] tmp = new byte[64 * 1024];
+      while (n > 0) {
+        int k = in.read(tmp, 0, (int) Math.min(tmp.length, n));
+        if (k < 0) throw new IOException("Fichier plus court que prévu");
+        n -= k;
+      }
+      return;
+    }
     while (n > 0) {
       long k = in.skip(n);
       if (k <= 0) {
@@ -354,6 +378,17 @@ public final class SmbCore {
    */
   public static long upload(DiskShare share, Source source, String target, long expected, int maxWrite,
                             boolean keep, boolean mayResume, Progress progress, Cancel cancel) throws IOException {
+    return upload(share, source, target, expected, maxWrite, keep, mayResume, progress, cancel, null);
+  }
+
+  /**
+   * Pareil, et `digest` (si non nul) reçoit tout l'original tel qu'il a été lu et envoyé, reprise
+   * comprise : son MD5 est rangé dans l'index, et « Libérer de la place » n'aura plus qu'à relire
+   * la copie du PC.
+   */
+  public static long upload(DiskShare share, Source source, String target, long expected, int maxWrite,
+                            boolean keep, boolean mayResume, Progress progress, Cancel cancel,
+                            MessageDigest digest) throws IOException {
     int chunk = Math.max(4096, Math.min(CHUNK, maxWrite));
     String finalPath = smbPath(target);
     String part = finalPath + ".part";
@@ -377,7 +412,7 @@ public final class SmbCore {
     InputStream in = null;
     long acked = 0;
     try {
-      in = source.open();
+      in = open(source, digest);
       long existing = keep ? file.getFileInformation(FileStandardInformation.class).getEndOfFile() : 0;
       long start = mayResume ? resumeOffset(file, in, existing, expected) : 0;
       // En reprise, tout ce qui suit le point de reprise est réécrit (un éventuel trou disparaît)
@@ -386,13 +421,17 @@ public final class SmbCore {
         // Rien à reprendre : on repart d'un fichier vide, et d'une source relue du début.
         file.setLength(0);
         in.close();
-        in = source.open();
+        in = open(source, digest);
       }
       long issued = start;
       acked = start;
       progress.onBytes(acked);
-      // DEPTH+1 tampons : on remplit le suivant pendant que les DEPTH autres sont en vol.
-      byte[][] buffers = new byte[DEPTH + 1][chunk];
+      // DEPTH+1 tampons : on remplit le suivant pendant que les DEPTH autres sont en vol. Une petite
+      // photo n'en prend qu'à sa taille : pas 5 Mo pour une image WhatsApp de 200 Ko.
+      long left = Math.max(1, expected - start);
+      int size = (int) Math.min(chunk, Math.max(4096, expected < 0 ? chunk : left));
+      int count = expected < 0 ? DEPTH + 1 : (int) Math.min(DEPTH + 1, (left + size - 1) / size + 1);
+      byte[][] buffers = new byte[count][size];
       ArrayDeque<Future<Long>> inflight = new ArrayDeque<>();
       ArrayDeque<Integer> lengths = new ArrayDeque<>();
       int slot = 0;
@@ -401,9 +440,9 @@ public final class SmbCore {
           if (cancel.get()) throw new Cancelled();
           byte[] buf = buffers[slot];
           slot = (slot + 1) % buffers.length;
-          int n = readChunk(in, buf, chunk);
+          int n = readChunk(in, buf, size);
           if (n <= 0) break;
-          while (inflight.size() >= DEPTH) {
+          while (inflight.size() >= Math.min(DEPTH, buffers.length - 1)) {
             long w = await(inflight.poll());
             int len = lengths.poll();
             if (w != len) throw new IOException("Écriture incomplète sur le PC");
@@ -463,6 +502,22 @@ public final class SmbCore {
     return acked;
   }
 
+  /** La source, relue du début, avec une empreinte remise à zéro si on en tient une. */
+  private static InputStream open(Source source, MessageDigest digest) throws IOException {
+    InputStream raw = source.open();
+    if (digest == null) return raw;
+    digest.reset();
+    return new java.security.DigestInputStream(raw, digest);
+  }
+
+  public static MessageDigest newMd5() {
+    try {
+      return MessageDigest.getInstance("MD5");
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
   public static String md5(InputStream in, Cancel cancel) throws IOException {
     MessageDigest digest;
     try {
@@ -519,7 +574,7 @@ public final class SmbCore {
     }
   }
 
-  static String hex(byte[] bytes) {
+  public static String hex(byte[] bytes) {
     StringBuilder sb = new StringBuilder();
     for (byte b : bytes) sb.append(String.format("%02x", b));
     return sb.toString();

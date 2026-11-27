@@ -2,7 +2,10 @@ import { useEffect, useState } from 'react';
 
 import { lang, t } from './i18n';
 import { Pg } from './native';
-import { PREP_SCRIPT } from './prepScript';
+import { PREP_SCRIPT, PREP_SHA256 } from './prepScript';
+
+/** Le début de l'empreinte du fichier, à comparer entre le téléphone et le PC (« 3f2a 9c01 77be »). */
+export const prepFingerprint = PREP_SHA256.slice(0, 12).replace(/(.{4})(?=.)/g, '$1 ');
 
 const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -24,9 +27,14 @@ p{color:#B8C2CE}small{display:block;margin-top:28px;color:#8B98A8}
 <a class="btn" href="/PixelGuard-PC.cmd" download>${escape(t.srvDownload)}</a>
 <ol><li>${escape(t.srvStep1)}</li><li>${escape(t.srvStep2)}</li><li>${escape(t.srvStep3)}</li></ol>
 <p>${escape(t.srvAlt)}</p><pre id="cmd"></pre><button id="copy">${escape(t.srvCopy)}</button>
+<p>${escape(t.srvPrint(prepFingerprint))}</p>
 <small>${escape(t.srvFoot)}</small>
 </main><script>
-var c = 'irm http://' + location.host + '/pg | iex';
+// Le fichier est lu en octets, son empreinte contrôlée, et seulement ensuite lancé : un fichier
+// modifié en route sur le réseau n'est pas exécuté.
+var c = "$b=(New-Object Net.WebClient).DownloadData('http://" + location.host + "/pg');" +
+  "if((-join([Security.Cryptography.SHA256]::Create().ComputeHash($b)|%{$_.ToString('x2')})) -eq '${PREP_SHA256}')" +
+  "{iex ([Text.Encoding]::UTF8.GetString($b))}else{'PixelGuard : fichier different, rien lance.'}";
 document.getElementById('cmd').textContent = c;
 document.getElementById('copy').onclick = function () {
   var x = document.createElement('textarea'); x.value = c; document.body.appendChild(x); x.select();

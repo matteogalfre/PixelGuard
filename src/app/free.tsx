@@ -132,6 +132,7 @@ export default function Free() {
       </Card>
 
       {message ? <Text style={[ty.body, { color: C.ok }]}>{message}</Text> : null}
+      {Platform.OS === 'ios' ? <Text style={ty.hint}>{t.freeIosEdits}</Text> : null}
 
       <MainButton label={t.freeVerify} icon="shield-check-outline" kind="gradient" onPress={free} disabled={!candidates?.length || !app.pc.host} />
     </Screen>

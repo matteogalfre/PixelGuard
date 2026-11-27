@@ -36,6 +36,13 @@ public class HttpTest {
     System.out.println("inconnu : " + missing[0] + ", POST : " + post[0]);
     System.out.println("adresse du téléphone (ici le Mac) : " + MiniServer.localIpv4() + ", port " + s.port());
     s.stop();
+    // Écoute sur une seule adresse, et refus d'un en-tête qui casserait la réponse.
+    MiniServer only = new MiniServer(0, pages, InetAddress.getByName("127.0.0.1"));
+    System.out.println("adresse unique : " + get("GET", "http://127.0.0.1:" + only.port() + "/")[0]);
+    only.stop();
+    String injected;
+    try { new MiniServer.Page("text/plain", new byte[0], "a\r\nSet-Cookie: x"); injected = "ACCEPTÉ"; } catch (IllegalArgumentException e) { injected = "refusé"; }
+    System.out.println("en-tête piégé : " + injected);
     Thread.sleep(200);
     String after;
     try { get("GET", base + "/"); after = "ENCORE OUVERT"; } catch (IOException e) { after = "fermé"; }

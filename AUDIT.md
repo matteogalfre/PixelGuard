@@ -162,6 +162,56 @@ Six cas où une copie pouvait être fausse, perdue ou supprimée à tort, corrig
   - le texte du mot de passe dit quoi faire avec un compte Microsoft, y compris sans mot de passe (Windows Hello seul) ;
   - avant une grosse sauvegarde, l'accueil donne une durée estimée (d'après le débit médian des sauvegardes passées, sinon 25 Mo/s) et, au-delà de 30 min, un conseil (brancher le téléphone).
 
+## Audit du 27/11 (lot 6)
+
+Relecture complète du JS, du script PC et des deux modules natifs. Ce qui suit est corrigé dans le code. Le banc Android passe en entier ; le Kotlin et le Swift n'ont pas été compilés (en attente du feu vert pour un build).
+
+### Le PC change d'adresse
+
+L'adresse IP du PC était enregistrée telle quelle : si la box lui en donnait une autre, l'appli le disait hors ligne jusqu'à un nouvel appairage. Maintenant, quand le PC ne répond pas, l'accueil le cherche sur le Wi-Fi par le nom retenu à l'appairage. S'il le trouve à une seule autre adresse, l'adresse enregistrée suit. Deux PC du même nom, ou aucun : on ne devine pas. La connexion contrôle de toute façon ce nom avant d'envoyer le mot de passe.
+
+### Android
+
+- **Plantage à l'arrêt du service.** Une connexion refusée en quelques millisecondes appelait `stopService` avant que le service ait eu le temps de passer au premier plan, et Android ferme l'appli dans ce cas. L'arrêt passe maintenant par un intent au service, qui arrive forcément après le démarrage.
+- **Notification orpheline.** Après la limite de 6 h d'Android 15, ou un démarrage refusé, la notification « en cours » restait avec un bouton Arrêter inutile. Le service dit lui-même s'il tient le premier plan, la notification suit, et elle est retirée à la fin. Arrêter sans personne pour l'entendre (JS rechargé) arrête le service.
+- **Signature exigée.** smbj ne l'exigeait pas : avec un PC qui ne l'exige pas (Windows 10, Mac) et le chiffrement coupé, quelqu'un sur le réseau pouvait fausser une copie puis la relecture MD5. Elle est exigée dès qu'il y a un compte. Le banc confirme `signed=true` contre impacket.
+- **VPN, Wi-Fi sans Internet.** Les sockets suivaient le réseau par défaut d'Android, qui peut être le VPN ou les données mobiles. La recherche des PC, le contrôle « en ligne », la résolution des noms et SMB passent maintenant par le réseau Wi-Fi lui-même. La recherche lit le vrai masque du réseau (de /22 à /30), sinon un /24.
+- **Wi-Fi écran éteint.** Le verrou basse latence ne vaut qu'écran allumé. Un second verrou (`FULL_HIGH_PERF`) garde le Wi-Fi hors économie d'énergie écran éteint, jusqu'à Android 13 (Android 14 l'ignore).
+- **PC qui ne répond plus pendant 120 s.** C'était une erreur définitive : le `.part` d'une grosse vidéo était jeté. C'est maintenant une coupure : le `.part` est gardé et l'envoi reprend.
+- **Contrôle de connexion borné à 5 s.** Une connexion à moitié ouverte (Wi-Fi changé) pouvait bloquer tous les appels 60 à 90 s.
+- **Taille périmée dans MediaStore.** La vraie taille est lue sur le fichier qu'on ouvre pour l'envoyer (pas d'ouverture en plus). Si elle diffère, le fichier est dit « changé » et repart à la sauvegarde suivante, au lieu d'échouer en « copie incomplète » à chaque fois.
+- **Écritures sûres.** L'index des copies et la liste des reprises sont écrits jusqu'au disque (`fsync`) avant remplacement : une coupure de courant ne laisse plus un fichier vide. La liste des reprises est gardée en mémoire au lieu d'être relue deux fois par fichier, et ne concerne plus que les fichiers de plus de 8 Mo (en dessous, un envoi coupé recommence de toute façon) : les photos n'écrivent plus rien sur le disque du téléphone, sur Android comme sur iPhone.
+- **Mémoire.** Les tampons d'envoi suivent la taille du fichier : une image WhatsApp de 200 Ko ne prend plus 5 Mo. La liste des albums ne lit que les colonnes utiles.
+
+### iPhone
+
+- **Reprise perdue après une coupure.** Windows garde l'ancien `.part` ouvert quelques instants : le nouvel essai recevait un refus, la trace de reprise était effacée et la vidéo repartait de zéro. Ce cas a maintenant son code (BUSY), la trace est gardée et le `.part` n'est plus effacé.
+- **Chiffrement à l'appairage.** N'importe quelle erreur passagère suffisait pour refaire la connexion sans chiffrement et enregistrer le PC non chiffré. Seul un vrai refus du chiffrement (SMB 2, ou refus explicite) le fait maintenant.
+- **Arrêter partout.** L'attente d'une photo, la relecture du début d'une reprise et l'attente du PC (jusqu'à 120 s) regardent maintenant Arrêter. Un PC figé rend la main 2 s après Arrêter. Un délai expiré compte comme une coupure.
+- **Fin du temps d'arrière-plan.** La tâche est close tout de suite dans le gestionnaire d'expiration, comme Apple le demande ; début et fin passent dans l'ordre.
+- **Connexions.** Ouverture et connexion passent une à la fois, et chaque connexion porte sa cible (PC, partage, compte) : une connexion vers un autre PC n'est jamais prêtée.
+- **Serveur du téléphone.** Même traitement que sur Android : écoute sur l'adresse Wi-Fi seulement, start et stop protégés, en-têtes bornés et contrôlés, 5 s au plus par requête.
+- **Robustesse.** La taille privée `fileSize` est lue seulement si elle existe (sinon 0, et la copie est refusée), les blocs vides de PhotoKit sont ignorés. La signature était déjà exigée par libsmb2 hors invité.
+
+Le banc iOS passe en entier. Le Swift n'est que relu par le compilateur en mode syntaxe, pas compilé. BUSY ne se vérifie pas sur le serveur de test (il n'applique pas les verrous de partage) : à voir sur Windows.
+
+### « Libérer de la place » deux fois plus léger
+
+Chaque envoi calcule le MD5 de l'original pendant qu'il le lit (reprise comprise) et le range dans l'index, avec la date de modification de l'original. Au moment de libérer de la place, si l'original n'a pas changé depuis, seule la copie du PC est relue et comparée à cette empreinte. Un original retouché depuis (autre date) est relu comme avant. Les copies faites avant cette version, ou trouvées sur le PC sans être envoyées par l'appli, sont aussi vérifiées comme avant. Le banc vérifie que l'empreinte d'un envoi complet, d'un envoi repris et d'une petite photo est celle du fichier.
+
+### Préparer le PC
+
+- **Ligne du Terminal contrôlée.** La commande `irm … | iex` lançait en administrateur un fichier arrivé en HTTP simple. La nouvelle ligne lit le fichier, contrôle son empreinte SHA-256, et ne le lance que si elle correspond. Le téléphone et la page affichent le début de l'empreinte. Limite : la page vient elle aussi du téléphone en HTTP ; quelqu'un capable de modifier le trafic pourrait changer la ligne entière, d'où l'empreinte affichée sur le téléphone, à comparer.
+- **Serveur du téléphone.** Il n'écoute plus que sur l'adresse Wi-Fi (ni point d'accès, ni VPN, ni données mobiles), répond à plusieurs requêtes à la fois avec un délai total de 5 s par requête, et refuse un en-tête qui casserait la réponse.
+- **Mot de passe dans `%TEMP%`.** Si la fenêtre était fermée sans Entrée, la page du code restait avec le mot de passe. Elle est effacée au lancement suivant.
+- **Versions précédentes (option).** Le compte `pixelguard` peut effacer ce qu'il a écrit, il en a besoin pour les `.part`. Le script propose maintenant, sans l'imposer, un cliché quotidien du disque des photos (protection du système, 10 % du disque au plus, tâche planifiée « PixelGuard versions »). Les copies effacées se retrouvent par clic droit › Restaurer les versions précédentes. Retirer PixelGuard retire la tâche. Pas encore essayé sur un vrai Windows.
+
+### Appli
+
+- Au retour dans l'appli, les chiffres de l'accueil se mettent à jour, et une comparaison avec le PC qui ne connaît pas les nouvelles photos est refaite. La galerie n'est relue que si elle a changé.
+- Un index illisible n'est mis de côté qu'une fois.
+- Sur iPhone, « Libérer de la place » dit que les retouches gardées par Photos (ralenti, effets Portrait, historique) ne sont pas copiées.
+
 ## Pistes pour plus tard
 
 - **Lecture en flux pour la vérification** : relire la copie en parallèle de la lecture locale (aujourd'hui c'est l'une après l'autre).

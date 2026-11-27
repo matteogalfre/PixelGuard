@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 
 import {
+  canRelocate,
+  movedTo,
   addToFolder,
   applyIndexPatch,
   decide,
@@ -245,5 +248,19 @@ test("le fichier donné par l'appli est bien tools/PixelGuard-PC.cmd (npm run em
   const embedded = readFileSync(new URL('../src/prepScript.ts', import.meta.url), 'utf8');
   const script = readFileSync(new URL('../tools/PixelGuard-PC.cmd', import.meta.url), 'utf8');
   assert.ok(embedded.includes(JSON.stringify(script)), 'relancer : npm run embed-prep');
+  // L'empreinte que contrôle la ligne du Terminal est bien celle des octets servis.
+  const sha = createHash('sha256').update(Buffer.from(script, 'utf8')).digest('hex');
+  assert.ok(embedded.includes(`PREP_SHA256 = "${sha}"`), 'empreinte périmée : npm run embed-prep');
 });
 
+
+test("PC qui change d'adresse : retrouvé par son nom, jamais deviné", () => {
+  assert.equal(canRelocate('192.168.1.20', 'DESKTOP-AB12'), true);
+  assert.equal(canRelocate('DESKTOP-AB12', 'DESKTOP-AB12'), false, 'un nom se résout tout seul');
+  assert.equal(canRelocate('192.168.1.20', ''), false, 'nom inconnu');
+  const found = [{ ip: '192.168.1.31', name: 'desktop-ab12' }, { ip: '192.168.1.40', name: 'NAS' }];
+  assert.equal(movedTo(found, '192.168.1.20', 'DESKTOP-AB12'), '192.168.1.31');
+  assert.equal(movedTo(found, '192.168.1.31', 'DESKTOP-AB12'), null, 'même adresse');
+  assert.equal(movedTo([...found, { ip: '192.168.1.50', name: 'DESKTOP-AB12' }], '192.168.1.20', 'DESKTOP-AB12'), null, 'deux PC du même nom');
+  assert.equal(movedTo(found, '192.168.1.20', 'AUTRE'), null);
+});

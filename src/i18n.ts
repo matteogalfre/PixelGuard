@@ -62,6 +62,7 @@ const fr = {
     diskFull: 'Le disque du PC est plein.',
     connection: "Connexion au PC perdue. Réessaie quand le Wi-Fi est stable.",
     busy: "Fichier encore ouvert sur le PC : il partira la prochaine fois.",
+    changed: "Ce fichier a changé sur le téléphone pendant la sauvegarde : il partira la prochaine fois.",
     exists: 'Un fichier de ce nom existe déjà sur le PC.',
     transfer: "Copie incomplète : ce fichier repartira la prochaine fois.",
     notEncrypted: "Ce PC refuse le chiffrement. Rien n'est parti. Chez toi, tu peux le couper dans les réglages du PC.",
@@ -236,6 +237,8 @@ const fr = {
   srvCopy: 'Copier',
   srvCopied: 'Copié',
   srvFoot: 'Ce fichier vient de ton téléphone, par ton Wi-Fi. Rien ne passe par internet.',
+  srvPrint: (p: string) => `La ligne du Terminal ne lance le fichier que si son empreinte est ${p}… : la même que sur le téléphone.`,
+  prepPrint: (p: string) => `Empreinte du fichier : ${p}`,
   prepShareText: 'PixelGuard : à ouvrir sur le PC, puis double-clic sur le fichier.',
   prepWin2: "Ouvre-le et réponds Oui. Si Windows bloque : « Informations complémentaires » › « Exécuter quand même ».",
   prepWin3: "Un code s'affiche sur le PC : scanne-le.",
@@ -326,6 +329,7 @@ const fr = {
   keepOpen: "Garde PixelGuard ouvert pendant l'envoi.",
   freeRefused: 'Rien supprimé.',
   freeKept: (n: number) => `${n} ${plural(n, 'photo gardée', 'photos gardées')} : pas tout vérifié (rafale, Live Photo).`,
+  freeIosEdits: "Les retouches gardées par l'app Photos (ralenti, effets Portrait, historique des retouches) ne sont pas copiées : l'original et la version retouchée le sont.",
 };
 
 type Dict = typeof fr;
@@ -362,6 +366,7 @@ const en: Dict = {
     diskFull: "The PC's disk is full.",
     connection: "Lost the PC. Try again once the Wi-Fi is steady.",
     busy: "File still open on the PC: it will go next time.",
+    changed: "This file changed on the phone during the backup: it will go next time.",
     exists: 'A file with this name is already on the PC.',
     transfer: "Incomplete copy: this file will go again next time.",
     notEncrypted: "This PC refuses encryption. Nothing was sent. At home, you can turn it off in the PC settings.",
@@ -534,6 +539,8 @@ const en: Dict = {
   srvCopy: 'Copy',
   srvCopied: 'Copied',
   srvFoot: 'This file comes from your phone, over your Wi-Fi. Nothing goes through the Internet.',
+  srvPrint: (p) => `The Terminal line only runs the file if its fingerprint is ${p}…: the same as on the phone.`,
+  prepPrint: (p) => `File fingerprint: ${p}`,
   prepShareText: 'PixelGuard: open this on the PC, then double-click the file.',
   prepWin2: "Open it and say Yes. If Windows blocks it: \"More info\" › \"Run anyway\".",
   prepWin3: "A code shows up on the PC: scan it.",
@@ -624,6 +631,7 @@ const en: Dict = {
   keepOpen: "Keep PixelGuard open while it sends.",
   freeRefused: 'Nothing deleted.',
   freeKept: (n) => `${n} ${plural(n, 'photo kept', 'photos kept')}: not all checked (burst, Live Photo).`,
+  freeIosEdits: "Edits kept by the Photos app (slow motion, Portrait effects, edit history) are not copied: the original and the edited version are.",
 };
 
 export const lang: Lang = getLocales()[0]?.languageCode === 'fr' ? 'fr' : 'en';

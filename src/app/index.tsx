@@ -5,7 +5,7 @@ import { Redirect, router, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, Pressable, Text, View } from 'react-native';
 
-import { preview, runBackup, stop, type BackupResult, type Progress } from '../engine';
+import { preview, relocate, runBackup, stop, type BackupResult, type Progress } from '../engine';
 import { ago, lang, periodLabel, t } from '../i18n';
 import { folderFor, humanBytes, humanDuration, joinPath, typicalRate } from '../logic';
 import { errorCode, errorMessage, isDemo, Pg } from '../native';
@@ -52,7 +52,16 @@ export default function Home() {
       let alive = true;
       if (pc.host) {
         setOnline(null);
-        Pg.probe(pc.host).then((ok) => alive && setOnline(ok));
+        Pg.probe(pc.host).then(async (ok) => {
+          if (!alive) return;
+          if (ok) return setOnline(true);
+          // Pas de réponse : la box a peut-être donné une autre adresse au PC. On le retrouve
+          // par son nom ; l'adresse enregistrée suit, et cet effet repart sur la nouvelle.
+          const moved = await relocate(pc).catch(() => null);
+          if (!alive) return;
+          if (moved) await app.savePc({ ...pc, host: moved }, app.password);
+          else setOnline(false);
+        });
       } else {
         setOnline(null);
       }
