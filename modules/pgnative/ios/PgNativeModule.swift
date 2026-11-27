@@ -131,6 +131,35 @@ public final class PgNativeModule: Module {
       self.run(promise) { try self.verify(uri, remotePath, Int64(size), expectedMd5 ?? "") }
     }
 
+    // ---------- Fichiers déjà sur le PC
+
+    // Au plus 1 Mo, en base64 (l'EXIF : date de prise de vue, vignette). nil si absent.
+    AsyncFunction("readRemote") { (path: String, offset: Double, length: Double, promise: Promise) in
+      self.run(promise) { () -> Any? in
+        guard let data = try self.smb.readRemote(path, Self.bytes(offset), Self.bytes(length)) else { return nil }
+        return data.base64EncodedString()
+      }
+    }
+
+    // MD5 de la copie du PC : nil si absente, « taille:N » si elle n'a pas `size` octets.
+    AsyncFunction("remoteMd5") { (path: String, size: Double, promise: Promise) in
+      self.run(promise) { () -> Any? in
+        if self.cancelled.get() { throw PgError("CANCELLED", "Arrêté") }
+        return try self.smb.md5Remote(path, Self.bytes(size), cancelled: self.cancelled)
+      }
+    }
+
+    AsyncFunction("move") { (from: String, to: String, promise: Promise) in
+      self.run(promise) {
+        try self.smb.move(from, to)
+        return true
+      }
+    }
+
+    AsyncFunction("download") { (remotePath: String, size: Double, name: String, video: Bool, transferId: String, promise: Promise) in
+      self.run(promise) { try self.download(remotePath, Self.bytes(size), name, video, transferId) }
+    }
+
     Function("cancel") { self.cancelled.set(true) }
     Function("resetCancel") { self.cancelled.set(false) }
 
@@ -274,6 +303,44 @@ public final class PgNativeModule: Module {
     let local = try gallery.md5(uri, cancelled: { [cancelled] in cancelled.get() })
     let remote = try smb.md5Remote(remotePath, size, cancelled: cancelled)
     return ["same": local == remote, "local": local, "remote": remote ?? NSNull(), "missing": remote == nil]
+  }
+
+  /** Un nombre d'octets venu du JS : négatif, NaN ou infini ne doivent pas planter la conversion. */
+  private static func bytes(_ d: Double) -> Int64 {
+    d.isFinite ? Int64(max(0, min(d, 9e18))) : 0
+  }
+
+  /**
+   * Ramène un fichier du PC dans la photothèque : lu vers un fichier temporaire qui porte son nom
+   * (Photos en tire le type), contrôlé à la taille, puis confié à PhotoKit. Le temporaire est
+   * effacé dans tous les cas.
+   */
+  private func download(_ remotePath: String, _ size: Int64, _ name: String, _ video: Bool, _ transferId: String) throws -> [String: Any] {
+    if cancelled.get() { throw PgError("CANCELLED", "Arrêté") }
+    // Un dossier par appel : deux retours du même nom en parallèle ne se marchent pas dessus.
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pixelguard-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let file = dir.appendingPathComponent(Self.localName(name))
+    var lastEmit = 0.0
+    let got = try smb.download(remotePath, to: file, size, cancelled: cancelled) { [weak self] bytes in
+      let now = CACurrentMediaTime()
+      if now - lastEmit > 0.2 {
+        lastEmit = now
+        self?.sendEvent("onProgress", ["id": transferId, "bytes": Double(bytes)])
+      }
+    }
+    sendEvent("onProgress", ["id": transferId, "bytes": Double(got)])
+    // Arrêter juste à la fin de la lecture : rien n'entre dans la photothèque.
+    if cancelled.get() { throw PgError("CANCELLED", "Arrêté") }
+    let uri = try gallery.add(file, name: name, video: video)
+    return ["uri": uri]
+  }
+
+  /** Le nom du fichier temporaire : celui du PC, extension gardée, sans séparateur de dossier. */
+  private static func localName(_ name: String) -> String {
+    let safe = String(name.map { "/\\:".contains($0) ? "_" : $0 }).trimmingCharacters(in: .whitespaces)
+    return safe.isEmpty || safe == "." || safe == ".." ? "fichier" : safe
   }
 
   private func speedTest(_ dir: String, _ megabytes: Int) throws -> [String: Any] {

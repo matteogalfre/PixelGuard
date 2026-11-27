@@ -170,6 +170,23 @@ static void *parallel_worker(void *arg) {
   return NULL;
 }
 
+/** MD5 de la même copie, calculé sur une connexion à soi (comme remoteMd5 en parallèle). */
+typedef struct {
+  const char *want;
+  int ok;
+} md5_worker;
+
+static void *md5_parallel(void *arg) {
+  md5_worker *w = arg;
+  char err[256], out[64];
+  pgs_conn *c;
+  if (pgs_connect(SERVER, "PHOTOS", NULL, "test", "test", 1, &c, err, sizeof(err)) != PGS_OK) return NULL;
+  int rc = pgs_md5_remote(c, "Tel/2026 Novembre/IMG_1.jpg", 7340033, NULL, NULL, out, err, sizeof(err));
+  w->ok = rc == PGS_OK && strcmp(out, w->want) == 0;
+  pgs_close(c);
+  return NULL;
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) return 2;
   SHARE_DIR = argv[1];
@@ -428,6 +445,93 @@ int main(int argc, char **argv) {
   s = source(&m, data, 1000);
   rc = pgs_upload(c, &s, "Tel/2026 Février/Été à la mer (1).jpg", 1000, 1, 0, &sent, NULL, err, sizeof(err));
   printf("accents : rc=%d identique=%d\n", rc, same_on_disk("Tel/2026 Février/Été à la mer (1).jpg", data, 1000));
+
+  // Lecture partielle (EXIF) : début, milieu (plafonné à 1 Mo), fin, au-delà, absent.
+  {
+    const char *img = "Tel/2026 Novembre/IMG_1.jpg";
+    uint8_t *rb = malloc(PGS_READ_MAX);
+    int g1 = -1, g2 = -1, g3 = -1, g4 = -1, g5 = -1;
+    int a = pgs_read_remote(c, img, 0, 100, rb, &g1, err, sizeof(err));
+    int ok1 = a == PGS_OK && g1 == 100 && memcmp(rb, data, 100) == 0;
+    int b = pgs_read_remote(c, img, 3000000, 2 << 20, rb, &g2, err, sizeof(err));
+    int ok2 = b == PGS_OK && g2 == PGS_READ_MAX && memcmp(rb, data + 3000000, PGS_READ_MAX) == 0;
+    int d = pgs_read_remote(c, img, len - 10, 100, rb, &g3, err, sizeof(err));
+    int ok3 = d == PGS_OK && g3 == 10 && memcmp(rb, data + len - 10, 10) == 0;
+    int e = pgs_read_remote(c, img, len + 5, 100, rb, &g4, err, sizeof(err));
+    int f = pgs_read_remote(c, "Tel/nope.jpg", 0, 100, rb, &g5, err, sizeof(err));
+    printf("lecture partielle : début=%s milieu=%s (%d octets) fin=%s (%d octets) au-delà=%d octets (rc=%d) absent=%s\n",
+           ok1 ? "ok" : "FAUX", ok2 ? "ok" : "FAUX", g2, ok3 ? "ok" : "FAUX", g3, g4, e,
+           f == PGS_NOT_FOUND ? "NOT_FOUND" : "??");
+    free(rb);
+  }
+
+  // MD5 de la copie du PC : bon, absent, autre taille, Arrêter.
+  {
+    char md[64];
+    int a = pgs_md5_remote(c, "Tel/2026 Novembre/IMG_1.jpg", len, NULL, NULL, md, err, sizeof(err));
+    int ok = a == PGS_OK && strcmp(md, local) == 0;
+    int b = pgs_md5_remote(c, "Tel/Absent/IMG_1.jpg", len, NULL, NULL, md, err, sizeof(err));
+    char sz[64];
+    pgs_md5_remote(c, "Tel/2026 Novembre/IMG_1.jpg", 1234, NULL, NULL, sz, err, sizeof(err));
+    memsrc stop;
+    memset(&stop, 0, sizeof(stop));
+    stop.cancel_now = 1;
+    int d = pgs_md5_remote(c, "Tel/2026 Novembre/IMG_1.jpg", len, m_cancelled, &stop, md, err, sizeof(err));
+    printf("remoteMd5 : bon=%s absent=%s autre taille=%s arrêt=%s\n", ok ? "ok" : "FAUX",
+           b == PGS_NOT_FOUND ? "NOT_FOUND" : "??", sz, d == PGS_CANCELLED ? "CANCELLED, ok" : "AUTRE");
+  }
+
+  // Ranger : dossiers créés, jamais d'écrasement, source absente.
+  {
+    pgs_mkdirs(c, "Tel/Ranger", err, sizeof(err));
+    s = source(&m, data, 1000);
+    pgs_upload(c, &s, "Tel/Ranger/A.jpg", 1000, 1, 0, &sent, NULL, err, sizeof(err));
+    int a = pgs_move(c, "Tel/Ranger/A.jpg", "Tel/Ranger/2026/Novembre/A.jpg", err, sizeof(err));
+    int moved = a == PGS_OK && same_on_disk("Tel/Ranger/2026/Novembre/A.jpg", data, 1000) && !exists("Tel/Ranger/A.jpg");
+    s = source(&m, data + 1, 1000);
+    pgs_upload(c, &s, "Tel/Ranger/A.jpg", 1000, 1, 0, &sent, NULL, err, sizeof(err));
+    int b = pgs_move(c, "Tel/Ranger/A.jpg", "Tel/Ranger/2026/Novembre/A.jpg", err, sizeof(err));
+    int intact = same_on_disk("Tel/Ranger/2026/Novembre/A.jpg", data, 1000) && same_on_disk("Tel/Ranger/A.jpg", data + 1, 1000);
+    char nf[256] = "";
+    int d = pgs_move(c, "Tel/Ranger/Absent.jpg", "Tel/Ranger/Jamais/Absent.jpg", nf, sizeof(nf));
+    printf("move : déplacé avec dossiers créés=%s, cible existante=%s (les deux intacts=%d), source absente=%s (%s), dossier créé quand même=%d\n",
+           moved ? "ok" : "FAUX", b == PGS_EXISTS ? "EXISTS" : "ÉCRASÉE ?", intact,
+           d == PGS_NOT_FOUND ? "NOT_FOUND" : "??", nf, exists("Tel/Ranger/Jamais"));
+  }
+
+  // Ramener sur le téléphone : copie complète, taille fausse, Arrêter, absent.
+  {
+    char lp[1024];
+    snprintf(lp, sizeof(lp), "%s/../out/ramene.jpg", SHARE_DIR);
+    const char *img = "Tel/2026 Novembre/IMG_1.jpg";
+    memsrc pr;
+    memset(&pr, 0, sizeof(pr));
+    pr.first = -1;
+    int64_t got = 0;
+    int a = pgs_download(c, img, lp, len, m_progress, m_cancelled, &pr, &got, err, sizeof(err));
+    struct stat lst;
+    int same = 0;
+    FILE *lf = fopen(lp, "rb");
+    if (lf) {
+      uint8_t *lb = malloc((size_t)len + 1);
+      size_t ln = fread(lb, 1, (size_t)len + 1, lf);
+      fclose(lf);
+      same = (int64_t)ln == len && memcmp(lb, data, (size_t)len) == 0;
+      free(lb);
+    }
+    printf("download : rc=%d, %lld octets, identique=%d, progression=%d appels (dernier %lld)\n", a, (long long)got, same,
+           pr.calls, (long long)pr.last);
+    unlink(lp);
+    int b = pgs_download(c, img, lp, len + 1, m_progress, m_cancelled, &pr, &got, err, sizeof(err));
+    printf("download taille fausse : %s (%s), fichier local=%d\n", b == PGS_TRANSFER ? "TRANSFER" : "??", err, stat(lp, &lst) == 0);
+    memset(&pr, 0, sizeof(pr));
+    pr.cancel_after_calls = 2;
+    int d = pgs_download(c, img, lp, len, m_progress, m_cancelled, &pr, &got, err, sizeof(err));
+    printf("download arrêté : %s après %lld octets, fichier local=%d\n", d == PGS_CANCELLED ? "CANCELLED, ok" : "AUTRE",
+           (long long)got, stat(lp, &lst) == 0);
+    int e = pgs_download(c, "Tel/nope.jpg", lp, 5, NULL, NULL, NULL, &got, err, sizeof(err));
+    printf("download absent : %s (%s), connexion %s\n", e == PGS_NOT_FOUND ? "NOT_FOUND" : "??", err, pgs_alive(c) ? "ok" : "PERDUE");
+  }
   pgs_close(c);
 
   // Trois connexions, trois envois à la fois (comme l'appli).
@@ -444,6 +548,14 @@ int main(int argc, char **argv) {
   }
   for (int i = 0; i < 3; i++) pthread_join(th[i], NULL);
   printf("trois envois en parallèle : %s\n", w[0].ok && w[1].ok && w[2].ok ? "ok" : "ÉCHEC");
+  md5_worker mw[3];
+  for (int i = 0; i < 3; i++) {
+    mw[i].want = local;
+    mw[i].ok = 0;
+    pthread_create(&th[i], NULL, md5_parallel, &mw[i]);
+  }
+  for (int i = 0; i < 3; i++) pthread_join(th[i], NULL);
+  printf("trois remoteMd5 en parallèle : %s\n", mw[0].ok && mw[1].ok && mw[2].ok ? "ok" : "ÉCHEC");
 
   // Le PC ne répond plus du tout (serveur figé) en plein envoi, puis Arrêter : on n'attend pas
   // les 60 s de libsmb2 ni les 120 s du délai, on rend la main en 2 à 3 s.

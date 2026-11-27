@@ -574,6 +574,88 @@ public final class SmbCore {
     }
   }
 
+  /**
+   * Au plus `len` octets à partir de `offset` (moins si le fichier est plus court, rien au-delà
+   * de la fin), ou null si le fichier n'existe pas. Sert à lire l'EXIF sans tout télécharger.
+   */
+  public static byte[] readAt(DiskShare share, String path, long offset, int len) {
+    File f;
+    try {
+      f = share.openFile(smbPath(path), EnumSet.of(AccessMask.GENERIC_READ), null,
+          SMB2ShareAccess.ALL, SMB2CreateDisposition.FILE_OPEN, null);
+    } catch (SMBApiException e) {
+      if (notFound(e)) return null;
+      throw e;
+    }
+    try {
+      long size = f.getFileInformation(FileStandardInformation.class).getEndOfFile();
+      int want = (int) Math.max(0, Math.min(len, size - offset));
+      byte[] buf = new byte[want];
+      int got = readAt(f, buf, offset, want);
+      return got == want ? buf : Arrays.copyOf(buf, got);
+    } finally {
+      try {
+        f.close();
+      } catch (Exception ignored) {
+      }
+    }
+  }
+
+  /**
+   * Déplace un fichier dans le partage (dossiers de `to` créés au besoin), sans jamais écraser :
+   * Exists si `to` est déjà pris.
+   */
+  public static void move(DiskShare share, String from, String to) throws IOException {
+    String target = smbPath(to);
+    int cut = target.lastIndexOf('\\');
+    if (cut > 0) mkdirs(share, target.substring(0, cut));
+    File f = share.openFile(smbPath(from), EnumSet.of(AccessMask.DELETE, AccessMask.FILE_READ_ATTRIBUTES), null,
+        SMB2ShareAccess.ALL, SMB2CreateDisposition.FILE_OPEN, null);
+    try {
+      f.rename(target, false);
+    } catch (SMBApiException e) {
+      if (e.getStatus() == NtStatus.STATUS_OBJECT_NAME_COLLISION) throw new Exists();
+      throw e;
+    } finally {
+      try {
+        f.close();
+      } catch (Exception ignored) {
+      }
+    }
+  }
+
+  /**
+   * Copie un fichier du PC dans `out`, par blocs, en contrôlant qu'il fait bien `size` octets.
+   * Renvoie le nombre d'octets copiés.
+   */
+  public static long download(DiskShare share, String path, long size, int maxRead, java.io.OutputStream out,
+                              Progress progress, Cancel cancel) throws IOException {
+    File f = share.openFile(smbPath(path), EnumSet.of(AccessMask.GENERIC_READ), null,
+        SMB2ShareAccess.ALL, SMB2CreateDisposition.FILE_OPEN, null);
+    try {
+      long onPc = f.getFileInformation(FileStandardInformation.class).getEndOfFile();
+      if (onPc != size) throw new IOException("Le fichier a changé sur le PC (" + onPc + " octets au lieu de " + size + ")");
+      byte[] buf = new byte[Math.max(4096, Math.min(CHUNK, maxRead))];
+      long offset = 0;
+      while (offset < size) {
+        if (cancel.get()) throw new Cancelled();
+        int want = (int) Math.min(buf.length, size - offset);
+        int n = f.read(buf, offset, 0, want);
+        if (n <= 0) throw new IOException("Copie incomplète (" + offset + " sur " + size + " octets)");
+        out.write(buf, 0, n);
+        offset += n;
+        progress.onBytes(offset);
+      }
+      out.flush();
+      return offset;
+    } finally {
+      try {
+        f.close();
+      } catch (Exception ignored) {
+      }
+    }
+  }
+
   public static String hex(byte[] bytes) {
     StringBuilder sb = new StringBuilder();
     for (byte b : bytes) sb.append(String.format("%02x", b));

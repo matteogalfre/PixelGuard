@@ -1,6 +1,7 @@
 // Le cœur SMB de PixelGuard sur iPhone, en C au-dessus de libsmb2 : le même travail que
 // SmbCore.java côté Android (envoi en flux continu, reprise d'un « .part », renommage sans
-// écraser, MD5 relu, liste des partages, nom NetBIOS). Testable sur le Mac sans iPhone.
+// écraser, MD5 relu, liste des partages, nom NetBIOS, lecture partielle, déplacement et retour
+// d'un fichier vers le téléphone). Testable sur le Mac sans iPhone.
 #ifndef PG_SMB_H
 #define PG_SMB_H
 
@@ -120,6 +121,36 @@ int pgs_upload(pgs_conn *c, pgs_source *src, const char *target, int64_t expecte
  */
 int pgs_md5_remote(pgs_conn *c, const char *path, int64_t size, int (*cancelled)(void *),
                    void *ctx, char out[64], char *err, size_t errlen);
+
+/** Au plus 1 Mo par lecture de pgs_read_remote. */
+enum { PGS_READ_MAX = 1 << 20 };
+
+/**
+ * Lit au plus `length` octets (plafonné à PGS_READ_MAX) à partir de `offset` dans `buf`, qui doit
+ * pouvoir les recevoir. `got` reçoit le nombre lu : moins si le fichier est plus court, 0 si
+ * `offset` est au-delà de la fin. Sert à lire l'EXIF sans tout ramener. PGS_NOT_FOUND s'il
+ * n'existe pas.
+ */
+int pgs_read_remote(pgs_conn *c, const char *path, int64_t offset, int64_t length, uint8_t *buf, int *got,
+                    char *err, size_t errlen);
+
+/**
+ * Crée les dossiers parents de `to`, puis renomme `from` en `to` dans le même partage, sans
+ * jamais écraser : PGS_EXISTS si `to` existe, PGS_NOT_FOUND si `from` n'existe pas (rien n'est
+ * créé dans ce cas).
+ */
+int pgs_move(pgs_conn *c, const char *from, const char *to, char *err, size_t errlen);
+
+/**
+ * Ramène le fichier `path` du PC dans le fichier local `local` (créé ou vidé). La copie du PC
+ * doit faire `expected` octets, et tout autant doit être lu : sinon PGS_TRANSFER (« Copie
+ * incomplète »). `progress` reçoit les octets reçus après chaque bloc, Arrêter est regardé entre
+ * les blocs (PGS_CANCELLED). En cas d'échec, le fichier local est effacé. PGS_NOT_FOUND si la
+ * copie n'existe pas.
+ */
+int pgs_download(pgs_conn *c, const char *path, const char *local, int64_t expected,
+                 void (*progress)(void *, int64_t), int (*cancelled)(void *), void *ctx, int64_t *got,
+                 char *err, size_t errlen);
 
 /** Requête NetBIOS « node status » (50 octets) : le PC répond avec son nom. */
 size_t pgs_nbstat_query(uint8_t buf[50], uint16_t txid);

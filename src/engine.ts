@@ -100,7 +100,7 @@ export function onPcIdentified(fn: ((pcId: string, identity: string) => void) | 
   identityListener = fn;
 }
 
-async function connect(pc: PcSettings, password: string) {
+export async function connect(pc: PcSettings, password: string) {
   const info = await Pg.connect({
     host: pc.host, share: pc.share, user: pc.user, password, encrypt: pc.encrypt, identity: pc.identity ?? '',
   });

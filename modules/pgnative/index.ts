@@ -72,6 +72,20 @@ export type PgApi = {
    * inchangé depuis), ne relit que la copie du PC.
    */
   verify(uri: string, remotePath: string, size: number, expectedMd5: string): Promise<VerifyResult>;
+  /**
+   * Au plus `length` octets (1 Mo au plus) à partir de `offset`, en base64 : de quoi lire l'EXIF
+   * sans tout télécharger. null si le fichier n'existe pas, "" au-delà de la fin.
+   */
+  readRemote(path: string, offset: number, length: number): Promise<string | null>;
+  /** MD5 de la copie du PC : null si absente, « taille:N » si elle n'a pas `size` octets. */
+  remoteMd5(path: string, size: number): Promise<string | null>;
+  /** Déplace un fichier dans le partage (dossiers créés au besoin), sans écraser : EXISTS sinon. */
+  move(from: string, to: string): Promise<boolean>;
+  /**
+   * Ramène un fichier du PC dans la galerie du téléphone (Android : Images ou Films/PixelGuard ;
+   * iPhone : Photos). Progression par onProgress avec `transferId`. Renvoie l'uri du nouveau média.
+   */
+  download(remotePath: string, size: number, name: string, video: boolean, transferId: string): Promise<{ uri: string }>;
   cancel(): void;
   resetCancel(): void;
   holdWifi(on: boolean): void;

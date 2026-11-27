@@ -1,7 +1,7 @@
 {
   "ios": {
     "NSPhotoLibraryUsageDescription": "PixelGuard lit tes photos pour les copier sur ton PC.",
-    "NSPhotoLibraryAddUsageDescription": "PixelGuard ne crée pas de photo.",
+    "NSPhotoLibraryAddUsageDescription": "PixelGuard ramène sur ton iPhone les photos que tu choisis sur ton PC.",
     "NSCameraUsageDescription": "PixelGuard lit le code affiché par ton PC pour s'y connecter. Aucune photo n'est prise.",
     "NSLocalNetworkUsageDescription": "PixelGuard cherche ton PC sur le Wi-Fi de la maison et y copie tes photos. Rien ne sort de ton réseau."
   }

@@ -23,7 +23,8 @@ exit /b
 #   3. ouvre le partage de fichiers sur les réseaux privés, et propose de passer ton Wi-Fi en
 #      « Privé » s'il est en « Public » ;
 #   4. affiche un code QR à scanner avec PixelGuard sur le téléphone ;
-#   5. si tu le veux, garde chaque jour une version précédente du dossier (clichés de Windows).
+#   5. si tu le veux, garde chaque jour une version précédente du dossier (clichés de Windows) ;
+#   6. si tu le veux, copie les nouvelles photos sur un disque dur externe dès qu'il est branché.
 # Relancé plus tard, il donne un nouveau mot de passe, ou retire tout (les photos restent).
 #
 # Licence : GPL-3.0 ou plus récente. Le dessin du QR vient de qrcode-generator (MIT), en bas.
@@ -36,6 +37,8 @@ function T([string]$f, [string]$e) { if ($fr) { $f } else { $e } }
 $User = 'pixelguard'
 $ShareName = 'PixelGuard'
 $TaskName = 'PixelGuard versions'
+$DiskTask = 'PixelGuard disque dur'
+$ToolDir = Join-Path $env:ProgramData 'PixelGuard'
 $PairingFile = Join-Path $env:TEMP 'pixelguard-appairage.html'
 $HideKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList'
 
@@ -156,9 +159,69 @@ function Enable-Versions([string]$dir) {
   }
 }
 
+# Le disque dur externe : on y marque le dossier choisi (fichier caché « .pixelguard-disque »),
+# ce qui le retrouve quelle que soit sa lettre. Une tâche du système regarde toutes les 10 minutes
+# s'il est branché et y copie ce qui manque (voir $DiskWorker plus bas). Elle n'efface ni ne
+# remplace jamais rien sur le disque, et laisse un bilan que l'appli affiche.
+function Set-DiskSync([string]$dir) {
+  Say ''
+  Say (T 'Branche le disque dur, puis choisis le dossier où ranger les photos dessus.' 'Plug in the hard drive, then pick the folder for the photos on it.')
+  Read-Host (T 'Entrée quand il est branché' 'Press Enter once it is plugged in') | Out-Null
+  $picked = Select-Folder ''
+  if (-not $picked) { Say (T '  Rien choisi : pas de synchro.' '  Nothing picked: no sync.') Yellow; return }
+  $q = Split-Path -Qualifier $picked
+  if ($q -eq (Split-Path -Qualifier $dir)) {
+    Say (T '  Ce dossier est sur le même disque que les photos du PC : choisis le disque dur externe.' `
+           '  This folder is on the same disk as the PC photos: pick the external hard drive.') Yellow
+    return
+  }
+  $rel = $picked.Substring($q.Length).TrimStart('\')
+  $marker = Join-Path $picked '.pixelguard-disque'
+  if (Test-Path -LiteralPath $marker) {
+    $guid = (Get-Content -LiteralPath $marker -Raw).Trim()
+  } else {
+    $guid = [guid]::NewGuid().ToString()
+    Set-Content -LiteralPath $marker -Value $guid -Encoding ASCII
+    (Get-Item -LiteralPath $marker -Force).Attributes = 'Hidden'
+  }
+  # Le dossier de l'outil : seuls le système et les administrateurs peuvent y écrire, puisque la
+  # tâche y lance un script avec les droits du système.
+  New-Item -ItemType Directory -Force -Path $ToolDir | Out-Null
+  & icacls $ToolDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+  $worker = Join-Path $ToolDir 'disque.ps1'
+  [IO.File]::WriteAllText($worker, $DiskWorker, (New-Object Text.UTF8Encoding $true))
+  $cfg = [ordered]@{ guid = $guid; rel = $rel; source = $dir }
+  [IO.File]::WriteAllText((Join-Path $ToolDir 'disque.json'), ($cfg | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
+  Remove-Item (Join-Path $ToolDir 'etat.json') -ErrorAction SilentlyContinue
+  $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File ""$worker"""
+  $every = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 10)
+  $boot = New-ScheduledTaskTrigger -AtStartup
+  $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 12)
+  Register-ScheduledTask -TaskName $DiskTask -Action $action -Trigger @($every, $boot) -Settings $settings `
+    -User 'SYSTEM' -RunLevel Highest -Description (T 'PixelGuard : copie les photos sur le disque dur externe quand il est branché' 'PixelGuard: copies the photos to the external hard drive when it is plugged in') -Force | Out-Null
+  Start-ScheduledTask -TaskName $DiskTask
+  Say ((T '  Synchro réglée vers ' '  Sync set up to ') + $picked) Green
+  Say (T '  Dès que ce disque est branché (contrôlé toutes les 10 min), les nouvelles photos y sont copiées puis vérifiées. Rien n''y est jamais effacé ni remplacé. L''appli affiche le bilan.' `
+         '  Whenever this drive is plugged in (checked every 10 min), new photos are copied to it and checked. Nothing on it is ever deleted or replaced. The app shows the summary.') Gray
+}
+
+# Le dossier des photos a changé : la synchro suit.
+function Update-DiskSource([string]$dir) {
+  $path = Join-Path $ToolDir 'disque.json'
+  if (-not (Test-Path -LiteralPath $path)) { return }
+  $cfg = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+  if ($cfg.source -eq $dir) { return }
+  $next = [ordered]@{ guid = $cfg.guid; rel = $cfg.rel; source = $dir }
+  [IO.File]::WriteAllText($path, ($next | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
+  Remove-Item (Join-Path $ToolDir 'etat.json') -ErrorAction SilentlyContinue
+}
+
 function Remove-PixelGuard {
   $share = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue
   if ($share) {
+    Remove-Item -LiteralPath (Join-Path $share.Path '.pixelguard-disque.json') -Force -ErrorAction SilentlyContinue
     & icacls $share.Path /remove $User | Out-Null
     Remove-SmbShare -Name $ShareName -Force
   }
@@ -166,6 +229,9 @@ function Remove-PixelGuard {
   Remove-ItemProperty -Path $HideKey -Name $User -ErrorAction SilentlyContinue
   # Les clichés déjà faits restent (Windows les efface quand il manque de place).
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+  # La synchro du disque dur s'arrête ; ce qui est déjà sur le disque y reste.
+  Unregister-ScheduledTask -TaskName $DiskTask -Confirm:$false -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $ToolDir -Recurse -Force -ErrorAction SilentlyContinue
   Say ''
   Say (T 'PixelGuard est retiré de ce PC : plus de partage, plus de compte. Tes photos sont toujours dans le dossier.' `
          'PixelGuard is removed from this PC: no more share, no more account. Your photos are still in the folder.') Green
@@ -215,9 +281,14 @@ function Main {
   $changeFolder = $false
   if ($existing) {
     Say (T 'PixelGuard est déjà installé sur ce PC.' 'PixelGuard is already set up on this PC.')
-    $a = Read-Host (T '[N]ouveau code pour un téléphone, changer de [D]ossier, ou [R]etirer PixelGuard ? (N/d/r)' `
-                      '[N]ew code for a phone, change the [F]older, or [R]emove PixelGuard? (N/f/r)')
+    $a = Read-Host (T '[N]ouveau code pour un téléphone, changer de [D]ossier, [S]ynchro avec un disque dur, ou [R]etirer PixelGuard ? (N/d/s/r)' `
+                      '[N]ew code for a phone, change the [F]older, [S]ync a hard drive, or [R]emove PixelGuard? (N/f/s/r)')
     if ($a -match '^[rR]') { Remove-PixelGuard; return }
+    if ($a -match '^[sS]') {
+      $current = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue
+      if ($current) { Set-DiskSync $current.Path } else { Say (T 'Pas de dossier partagé : choisis d''abord [N].' 'No shared folder: pick [N] first.') Yellow }
+      return
+    }
     $changeFolder = $a -match '^[dDfF]'
   }
 
@@ -264,6 +335,13 @@ function Main {
   Get-NetFirewallRule -Group '@FirewallAPI.dll,-28502' | Where-Object { "$($_.Profile)" -like '*Private*' } | Enable-NetFirewallRule
   Set-PrivateNetwork
   Enable-Versions $dir
+  Update-DiskSource $dir
+  if (-not $existing) {
+    Say ''
+    $a = Read-Host (T 'Option : copier aussi les photos sur un disque dur externe, toute seule, dès qu''il est branché ? (o/N)' `
+                      'Option: also copy the photos to an external hard drive, by itself, whenever it is plugged in? (y/N)')
+    if ($a -match '^[oOyY]') { Set-DiskSync $dir }
+  }
 
   Say ''
   Say ((T 'Prêt : les photos arriveront dans ' 'Ready: photos will arrive in ') + $dir) Green
@@ -277,6 +355,171 @@ function Main {
   }
   Show-Pairing $env:COMPUTERNAME $ip $pass
 }
+
+# Le script de la tâche « PixelGuard disque dur », écrit dans %ProgramData%\PixelGuard.
+$DiskWorker = @'
+# PixelGuard : copie les photos du PC sur le disque dur externe quand il est branché.
+# Lancé toutes les 10 minutes par la tâche « PixelGuard disque dur ». Il copie seulement les
+# fichiers absents du disque : rien n'y est jamais effacé ni remplacé. Chaque fichier copié est
+# relu des deux côtés (MD5). Un bilan est laissé dans le dossier partagé, l'appli l'affiche.
+$ErrorActionPreference = 'Stop'
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$cfg = Get-Content -LiteralPath (Join-Path $here 'disque.json') -Raw | ConvertFrom-Json
+$src = ([string]$cfg.source).TrimEnd('\')
+$statePath = Join-Path $here 'etat.json'
+$reportPath = Join-Path $src '.pixelguard-disque.json'
+$now = (Get-Date).ToUniversalTime().ToString('o')
+
+$state = @{ present = $false; lastSync = '' }
+if (Test-Path -LiteralPath $statePath) {
+  try {
+    $s = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+    $state.present = [bool]$s.present
+    $state.lastSync = [string]$s.lastSync
+  } catch { }
+}
+
+function Save-State {
+  [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding $false))
+}
+
+$old = $null
+if (Test-Path -LiteralPath $reportPath) {
+  try { $old = [IO.File]::ReadAllText($reportPath) | ConvertFrom-Json } catch { }
+}
+
+# Le bilan suivant, en reprenant ce que le précédent savait.
+function New-Report {
+  [ordered]@{
+    version = 1
+    label = if ($old) { [string]$old.label } else { '' }
+    path = if ($old) { [string]$old.path } else { '' }
+    present = $false
+    lastSeen = if ($old) { [string]$old.lastSeen } else { '' }
+    lastSync = if ($old) { [string]$old.lastSync } else { '' }
+    copied = if ($old) { [int]$old.copied } else { 0 }
+    failed = if ($old -and $old.failed) { @($old.failed) } else { @() }
+    damaged = if ($old -and $old.damaged) { @($old.damaged) } else { @() }
+    missing = if ($old) { [int]$old.missing } else { 0 }
+    missingSample = if ($old -and $old.missingSample) { @($old.missingSample) } else { @() }
+    pcFolders = if ($old -and $old.pcFolders) { $old.pcFolders } else { @{} }
+    diskFolders = if ($old -and $old.diskFolders) { $old.diskFolders } else { @{} }
+  }
+}
+
+function Write-Report($r) {
+  [IO.File]::WriteAllText($reportPath, ($r | ConvertTo-Json -Depth 5 -Compress), (New-Object Text.UTF8Encoding $false))
+}
+
+# Le disque : le dossier marqué de notre identifiant, quelle que soit sa lettre aujourd'hui.
+$target = $null
+$label = ''
+foreach ($d in @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
+  try {
+    $p = Join-Path $d.Root $cfg.rel
+    $m = Join-Path $p '.pixelguard-disque'
+    if ((Test-Path -LiteralPath $m) -and ((Get-Content -LiteralPath $m -Raw).Trim() -eq $cfg.guid)) {
+      $target = $p.TrimEnd('\')
+      $label = [string](Get-Volume -DriveLetter $d.Name -ErrorAction SilentlyContinue).FileSystemLabel
+      break
+    }
+  } catch { }
+}
+
+if (-not $target) {
+  if ($state.present) {
+    $state.present = $false
+    Save-State
+    $r = New-Report
+    Write-Report $r
+  }
+  return
+}
+
+# Rien de neuf depuis la dernière copie (aucun dossier modifié) et le disque était déjà là : on
+# ne relit pas tout le disque toutes les 10 minutes.
+$last = [datetime]::MinValue
+if ($state.lastSync) { try { $last = [datetime]::Parse($state.lastSync).ToUniversalTime() } catch { } }
+$dirs = @(Get-Item -LiteralPath $src) + @(Get-ChildItem -LiteralPath $src -Directory -Recurse -Depth 2 -Force -ErrorAction SilentlyContinue)
+$newest = ($dirs | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
+if ($state.present -and $newest -le $last) {
+  $r = New-Report
+  $r.present = $true
+  $r.lastSeen = $now
+  $r.path = $target
+  $r.label = $label
+  Write-Report $r
+  return
+}
+
+# Copie seulement les fichiers absents du disque (/XC /XN /XO : jamais de remplacement), sans
+# les envois en cours (.part), les fichiers de l'appli ni le dossier _Doublons.
+$common = @('/E', '/FFT', '/XC', '/XN', '/XO', '/R:1', '/W:1', '/XJ', '/NJH', '/NJS', '/NDL', '/NC', '/NS', '/NP', '/FP',
+  '/XD', '_Doublons', '/XF', '*.part', '.pixelguard-*')
+
+function Get-Todo {
+  $log = Join-Path $here 'liste.log'
+  & robocopy.exe $src $target @common /L "/UNILOG:$log" | Out-Null
+  @(Get-Content -LiteralPath $log -Encoding Unicode -ErrorAction SilentlyContinue |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) })
+}
+
+function Get-Rel([string]$full, [string]$root) {
+  $full.Substring([Math]::Min($root.Length, $full.Length)).TrimStart('\').Replace('\', '/')
+}
+
+# Nombre de fichiers par dossier, pour la carte des mois de l'appli.
+function Count-Folders([string]$root) {
+  $map = @{}
+  Get-ChildItem -LiteralPath $root -File -Recurse -Force -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notlike '*.part' -and $_.Name -notlike '.pixelguard*' -and $_.FullName -notmatch '\\_Doublons(\\|$)' } |
+    ForEach-Object {
+      $rel = Get-Rel $_.DirectoryName $root
+      if ($map.ContainsKey($rel)) { $map[$rel]++ } else { $map[$rel] = 1 }
+    }
+  $map
+}
+
+$todo = Get-Todo
+$copied = 0
+$failed = @()
+$damaged = @()
+if ($todo.Count) {
+  & robocopy.exe $src $target @common "/UNILOG:$(Join-Path $here 'copie.log')" | Out-Null
+  foreach ($f in $todo) {
+    $rel = Get-Rel $f $src
+    $dst = Join-Path $target ($rel.Replace('/', '\'))
+    if (-not (Test-Path -LiteralPath $dst -PathType Leaf)) { $failed += $rel; continue }
+    if ((Get-FileHash -LiteralPath $f -Algorithm MD5).Hash -ne (Get-FileHash -LiteralPath $dst -Algorithm MD5).Hash) {
+      $damaged += $rel
+    } else {
+      $copied++
+    }
+  }
+}
+$left = @(Get-Todo)
+
+$r = New-Report
+$r.present = $true
+$r.lastSeen = $now
+$r.path = $target
+$r.label = $label
+$r.lastSync = $now
+$r.copied = $copied
+$r.failed = @($failed | Select-Object -First 200)
+$r.damaged = @($damaged | Select-Object -First 200)
+$r.missing = $left.Count
+$r.missingSample = @($left | Select-Object -First 200 | ForEach-Object { Get-Rel $_ $src })
+$r.pcFolders = Count-Folders $src
+$r.diskFolders = Count-Folders $target
+Write-Report $r
+
+$state.present = $true
+$state.lastSync = $now
+Save-State
+
+'@
 
 $Page = @'
 <!doctype html>

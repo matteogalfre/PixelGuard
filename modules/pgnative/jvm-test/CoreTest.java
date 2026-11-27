@@ -108,6 +108,35 @@ public class CoreTest {
     SmbCore.upload(share, () -> SmbCore.noise(sz), "Tel/.pixelguard-vitesse", sz, proto.getMaxWriteSize(), false, false, b -> {}, () -> false);
     sec = (System.nanoTime() - t) / 1e9;
     System.out.printf("test de vitesse 64 Mo: %.1f Mo/s, fichier restant=%s%n", sz / sec / 1e6, Files.exists(Paths.get(shareDir, "Tel", ".pixelguard-vitesse.part")));
+    // Outils du PC : lire un morceau, déplacer sans écraser, ramener un fichier.
+    byte[] head = SmbCore.readAt(share, "Tel/2026 Novembre/IMG_1.jpg", 0, 65536);
+    byte[] mid = SmbCore.readAt(share, "Tel/2026 Novembre/IMG_1.jpg", 1000, 10);
+    byte[] past = SmbCore.readAt(share, "Tel/2026 Novembre/IMG_1.jpg", data.length + 5, 10);
+    System.out.println("lecture : début=" + Arrays.equals(head, Arrays.copyOf(data, 65536)) + " milieu=" + Arrays.equals(mid, Arrays.copyOfRange(data, 1000, 1010))
+        + " après la fin=" + past.length + " absent=" + SmbCore.readAt(share, "Tel/absent.jpg", 0, 10));
+    SmbCore.move(share, "Tel/2026 Novembre/IMG-WA.jpg", "Tel/_Doublons/2026 Novembre/IMG-WA.jpg");
+    System.out.println("déplacé=" + Files.exists(Paths.get(shareDir, "Tel", "_Doublons", "2026 Novembre", "IMG-WA.jpg"))
+        + " source partie=" + !Files.exists(Paths.get(shareDir, "Tel", "2026 Novembre", "IMG-WA.jpg")));
+    try {
+      SmbCore.move(share, "Tel/_Doublons/2026 Novembre/IMG-WA.jpg", "Tel/2026 Novembre/IMG_1.jpg");
+      System.out.println("déplacement sur un nom pris : ÉCRASÉ");
+    } catch (SmbCore.Exists e) { System.out.println("déplacement sur un nom pris : refusé, identique=" + Arrays.equals(Files.readAllBytes(Paths.get(shareDir, "Tel", "2026 Novembre", "IMG_1.jpg")), data)); }
+    try {
+      SmbCore.move(share, "Tel/absent.jpg", "Tel/x.jpg");
+      System.out.println("source absente : ACCEPTÉE");
+    } catch (com.hierynomus.mssmb2.SMBApiException e) { System.out.println("source absente : " + e.getStatus()); }
+    java.io.ByteArrayOutputStream back = new java.io.ByteArrayOutputStream();
+    long got = SmbCore.download(share, "Tel/2026 Novembre/IMG_1.jpg", data.length, proto.getMaxReadSize(), back, b -> {}, () -> false);
+    System.out.println("ramené=" + got + " identique=" + Arrays.equals(back.toByteArray(), data));
+    try {
+      SmbCore.download(share, "Tel/2026 Novembre/IMG_1.jpg", data.length + 1, proto.getMaxReadSize(), new java.io.ByteArrayOutputStream(), b -> {}, () -> false);
+      System.out.println("taille fausse : ACCEPTÉE");
+    } catch (java.io.IOException e) { System.out.println("taille fausse : refusée (" + e.getMessage() + ")"); }
+    try {
+      int[] k = {0};
+      SmbCore.download(share, "Tel/2026 Novembre/IMG_1.jpg", data.length, proto.getMaxReadSize(), new java.io.ByteArrayOutputStream(), b -> {}, () -> ++k[0] > 2);
+      System.out.println("arrêt : NON pris en compte");
+    } catch (SmbCore.Cancelled e) { System.out.println("arrêt pendant le rapatriement : ok"); }
     // Reprise : un envoi de 20 Mo coupé vers 12 Mo garde son .part, le suivant repart de là.
     byte[] big = new byte[20 << 20]; new Random(3).nextBytes(big);
     String bigPath = "Tel/2026 Novembre/VID_1.mp4";

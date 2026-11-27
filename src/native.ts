@@ -103,6 +103,22 @@ function demo(): PgApi {
       return { bytes: size, md5: 'demo' };
     },
     async verify(_uri, path) { await wait(30); return { same: remote.has(path), local: 'x', remote: 'x', missing: !remote.has(path) }; },
+    async readRemote(path) { await wait(20); return remote.has(path) ? '' : null; },
+    async remoteMd5(path, size) { await wait(30); return remote.has(path) ? (remote.get(path) === size ? 'demo' : `taille:${remote.get(path)}`) : null; },
+    async move(from, to) {
+      if (remote.has(to)) throw fail('EXISTS', 'Existe déjà');
+      remote.set(to, remote.get(from) ?? 0);
+      remote.delete(from);
+      return true;
+    },
+    async download(_path, size, name, _video, id) {
+      for (let got = 0; got < size; got += 1.2e6) {
+        if (stop) throw fail('CANCELLED', 'Arrêté');
+        await wait(40);
+        listeners.forEach((l) => l({ id, bytes: Math.min(got, size) }));
+      }
+      return { uri: `demo://${name}` };
+    },
     cancel() { stop = true; },
     resetCancel() { stop = false; },
     holdWifi() {},

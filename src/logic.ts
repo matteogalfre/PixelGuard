@@ -403,3 +403,64 @@ export function movedTo(found: { ip: string; name: string }[], host: string, ide
   if (same.length !== 1 || same[0].ip === host.trim()) return null;
   return same[0].ip;
 }
+
+// ---------------------------------------------------------------- doublons sur le PC
+
+export type DupFile = { path: string; size: number };
+/** Pourquoi garder celui-là : le bon mois, le nom d'origine, ou à défaut le chemin le plus court. */
+export type DupReason = 'month' | 'name' | 'path';
+
+const dirOfPath = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
+const baseOfPath = (p: string) => p.slice(p.lastIndexOf('/') + 1);
+
+/**
+ * Lequel garder parmi des copies identiques : celle rangée dans le dossier où l'appli la
+ * mettrait aujourd'hui (`expectedDir`, d'après la date de prise de vue), puis celle au nom
+ * d'origine (pas « nom (1) »), puis le chemin le plus court. Les autres partent dans _Doublons.
+ */
+export function recommendKeep(files: DupFile[], expectedDir: string | null): { keep: string; reason: DupReason } {
+  const want = expectedDir?.toLowerCase() ?? null;
+  const inMonth = (f: DupFile) => want !== null && dirOfPath(f.path).toLowerCase() === want;
+  const original = (f: DupFile) => !/ \(\d+\)$/.test(splitExt(baseOfPath(f.path))[0]);
+  const score = (f: DupFile) => (inMonth(f) ? 4 : 0) + (original(f) ? 2 : 0);
+  const sorted = [...files].sort(
+    (a, b) => score(b) - score(a) || a.path.length - b.path.length || a.path.localeCompare(b.path),
+  );
+  const best = sorted[0];
+  const reason: DupReason =
+    inMonth(best) && files.some((f) => !inMonth(f)) ? 'month' : original(best) && files.some((f) => !original(f)) ? 'name' : 'path';
+  return { keep: best.path, reason };
+}
+
+/** Où ranger un doublon écarté : sous « _Doublons », au même chemin relatif. */
+export function quarantinePath(root: string, path: string, attempt = 0): string {
+  const rel = root && path.toLowerCase().startsWith(root.toLowerCase() + '/') ? path.slice(root.length + 1) : path;
+  let target = joinPath(root, '_Doublons', rel);
+  if (attempt > 0) {
+    const [r, ext] = splitExt(target);
+    target = `${r} (${attempt})${ext}`;
+  }
+  return target;
+}
+
+// ---------------------------------------------------------------- dossiers des mois
+
+const ALL_MONTHS = [...MONTHS.fr, ...MONTHS.en];
+
+/** Le mois d'un dossier du PC (« 2026 Novembre », « 2026/11 Novembre »), ou null. */
+export function monthOfFolder(rel: string): number | null {
+  const parts = rel.split('/');
+  const last = parts[parts.length - 1] ?? '';
+  const m1 = /^(\d{4}) (.+)$/.exec(last);
+  if (m1) {
+    const i = ALL_MONTHS.findIndex((m) => m.toLowerCase() === m1[2].toLowerCase());
+    if (i >= 0) return Number(m1[1]) * 100 + (i % 12) + 1;
+  }
+  const m2 = /^(\d{2}) .+$/.exec(last);
+  const year = parts.length >= 2 ? /^(\d{4})$/.exec(parts[parts.length - 2]) : null;
+  if (m2 && year) {
+    const mo = Number(m2[1]);
+    if (mo >= 1 && mo <= 12) return Number(year[1]) * 100 + mo;
+  }
+  return null;
+}

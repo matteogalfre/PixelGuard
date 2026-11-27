@@ -6,6 +6,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, Pressable, Text, View } from 'react-native';
 
 import { preview, relocate, runBackup, stop, type BackupResult, type Progress } from '../engine';
+import { readDiskReport, type DiskReport } from '../pcTools';
+import { diskLine } from '../ui/diskLine';
 import { ago, lang, periodLabel, t } from '../i18n';
 import { folderFor, humanBytes, humanDuration, joinPath, typicalRate } from '../logic';
 import { errorCode, errorMessage, isDemo, Pg } from '../native';
@@ -45,6 +47,7 @@ export default function Home() {
   const lastSample = useRef(0);
   const cmpRun = useRef(0);
   const configured = !!(pc.host && pc.share);
+  const [diskReport, setDiskReport] = useState<DiskReport | null>(null);
 
   // Le PC répond-il ? Un simple essai de connexion au port SMB, à chaque retour sur l'écran.
   useFocusEffect(
@@ -104,6 +107,19 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [online, configured, app.ready, running, cmp, selectionKey]);
 
+  // Le bilan du disque dur, lu une fois le PC joignable (rien s'il n'est pas réglé).
+  useEffect(() => {
+    if (online !== true || !configured || running) return;
+    let alive = true;
+    readDiskReport(pc, app.password)
+      .then((r) => alive && setDiskReport(r))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [online, configured, running, pc.id]);
+
   useEffect(() => {
     if (!progress || progress.phase !== 'send') return;
     const now = Date.now();
@@ -140,6 +156,7 @@ export default function Home() {
   const toSendBytes = toSend.reduce((n, m) => n + m.size, 0);
   const lastRun = app.history[0];
   const isCustom = !['all', 'thisMonth', 'lastMonth'].includes(app.period.kind);
+  const disk = { report: diskReport, ...diskLine(diskReport) };
 
   async function backup() {
     if (!configured) return router.push('/pc');
@@ -440,6 +457,24 @@ export default function Home() {
           <View style={{ flex: 1 }}>
             <Text style={ty.h3}>{t.freeRow}</Text>
             <Text style={ty.small}>{t.freeRowSub(size(stats.savedBytes))}</Text>
+          </View>
+          <Icon name="chevron-right" size={22} color={C.muted} />
+        </Card>
+      ) : null}
+
+      {configured ? (
+        <Card onPress={() => router.push('/tools')} style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
+          <Icon name="folder-search-outline" size={24} color={C.accent} />
+          <View style={{ flex: 1, gap: 2 }}>
+            <Text style={ty.h3}>{t.tools.row}</Text>
+            {disk.report ? (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Icon name="harddisk" size={14} color={disk.color} />
+                <Text style={[ty.small, { color: disk.color, flex: 1 }]} numberOfLines={1}>{disk.text}</Text>
+              </View>
+            ) : (
+              <Text style={ty.small} numberOfLines={1}>{t.tools.rowSub}</Text>
+            )}
           </View>
           <Icon name="chevron-right" size={22} color={C.muted} />
         </Card>

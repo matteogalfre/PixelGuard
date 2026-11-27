@@ -43,6 +43,11 @@ Obtainium keeps the app up to date straight from this repository's releases. And
 - [x] Encrypted transfers (SMB 3), with the phone's hardware AES
 - [x] Frees up space: every copy is read back and compared byte by byte before anything leaves the phone, then Android asks you and moves it to the trash
 - [x] Keeps the GPS location of your photos (it asks for the media location permission)
+- [x] Copies the PC photos to an external hard drive by itself whenever it's plugged in (set up with the PC file, option [S]), checks every copy, never deletes or replaces anything on the drive, and shows in the app what isn't on the drive yet
+- [x] Finds the same photo filed in two places on the PC and suggests which one to keep (the right month from the date taken, then the original name). The others go to a `_Doublons` folder, nothing is deleted
+- [x] Checks the copies on the PC against the fingerprint taken while sending, to spot a damaged or missing file early
+- [x] A month by month map: on the phone, on the PC, on the hard drive
+- [x] Brings photos back from the PC to the phone
 - [x] In English or French
 
 ## Set up the PC (once)

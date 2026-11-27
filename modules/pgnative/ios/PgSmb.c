@@ -17,6 +17,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "smb2.h"
 #include "libsmb2.h"
@@ -862,6 +863,203 @@ int pgs_md5_remote(pgs_conn *c, const char *path, int64_t size, int (*cancelled)
     free(buf);
   }
   if (c->smb2 != NULL && sock_ok(c->smb2)) smb2_close(c->smb2, fh);
+  return result;
+}
+
+// ------------------------------------------------------------------ Fichiers déjà sur le PC
+
+/**
+ * Ouvre un fichier du partage en lecture et lit sa taille sur le fichier lui-même. PGS_NOT_FOUND
+ * (message « Introuvable sur le PC ») s'il n'existe pas.
+ */
+static int open_remote(pgs_conn *c, const char *path, struct smb2fh **out, int64_t *size, char *err, size_t errlen) {
+  *out = NULL;
+  *size = -1;
+  if (!pgs_alive(c)) return fail(c, -ENOTCONN, err, errlen);
+  char *p = norm(path);
+  if (p == NULL) return fail(c, -ENOMEM, err, errlen);
+  clear_status(c);
+  struct smb2fh *fh = smb2_open(c->smb2, p, O_RDONLY);
+  free(p);
+  if (fh == NULL) {
+    if (c->smb2 != NULL && not_found((uint32_t)smb2_get_nterror(c->smb2))) {
+      seterr(err, errlen, "Introuvable sur le PC : %s", path);
+      return PGS_NOT_FOUND;
+    }
+    return fail(c, -EIO, err, errlen);
+  }
+  struct smb2_stat_64 st;
+  if (smb2_fstat(c->smb2, fh, &st) < 0) {
+    int rc = fail(c, -EIO, err, errlen);
+    if (c->smb2 != NULL && sock_ok(c->smb2)) smb2_close(c->smb2, fh);
+    return rc;
+  }
+  *out = fh;
+  *size = (int64_t)st.smb2_size;
+  return PGS_OK;
+}
+
+static void close_remote(pgs_conn *c, struct smb2fh *fh) {
+  if (fh != NULL && c->smb2 != NULL && sock_ok(c->smb2)) smb2_close(c->smb2, fh);
+}
+
+/** Taille d'une lecture : 1 Mo, moins si le PC l'impose. */
+static uint32_t read_chunk(pgs_conn *c) {
+  uint32_t max_read = smb2_get_max_read_size(c->smb2);
+  uint32_t chunk = PGS_CHUNK;
+  if (max_read > 0 && max_read < chunk) chunk = max_read;
+  if (chunk < 4096) chunk = 4096;
+  return chunk;
+}
+
+int pgs_read_remote(pgs_conn *c, const char *path, int64_t offset, int64_t length, uint8_t *buf, int *got,
+                    char *err, size_t errlen) {
+  *got = 0;
+  if (offset < 0) offset = 0;
+  if (length < 0) length = 0;
+  if (length > PGS_READ_MAX) length = PGS_READ_MAX;
+  struct smb2fh *fh;
+  int64_t size;
+  int result = open_remote(c, path, &fh, &size, err, errlen);
+  if (result != PGS_OK) return result;
+  // Fichier plus court : moins d'octets ; au-delà de la fin : rien.
+  int64_t want = offset >= size ? 0 : (size - offset < length ? size - offset : length);
+  uint32_t chunk = read_chunk(c);
+  int64_t done = 0;
+  while (done < want) {
+    uint32_t n = (uint32_t)(want - done < chunk ? want - done : chunk);
+    int r = smb2_pread(c->smb2, fh, buf + done, n, (uint64_t)(offset + done));
+    if (r < 0) {
+      result = fail(c, r, err, errlen);
+      break;
+    }
+    if (r == 0) break; // raccourci entre-temps
+    done += r;
+  }
+  close_remote(c, fh);
+  *got = (int)done;
+  return result;
+}
+
+int pgs_move(pgs_conn *c, const char *from, const char *to, char *err, size_t errlen) {
+  // La source d'abord : un nom introuvable ne doit pas laisser de dossiers vides derrière lui.
+  int64_t size;
+  int result = pgs_stat(c, from, &size, err, errlen);
+  if (result != PGS_OK) return result;
+  if (size < 0) {
+    seterr(err, errlen, "Introuvable sur le PC : %s", from);
+    return PGS_NOT_FOUND;
+  }
+  char *src = norm(from);
+  char *dst = norm(to);
+  if (src == NULL || dst == NULL) {
+    free(src);
+    free(dst);
+    return fail(c, -ENOMEM, err, errlen);
+  }
+  char *slash = strrchr(dst, '\\');
+  if (slash != NULL) {
+    *slash = 0;
+    result = pgs_mkdirs(c, dst, err, errlen);
+    *slash = '\\';
+  }
+  if (result == PGS_OK) {
+    clear_status(c);
+    // libsmb2 renomme sans remplacer : un nom déjà pris est refusé par le PC, jamais écrasé.
+    int rc = smb2_rename(c->smb2, src, dst);
+    if (rc < 0) {
+      uint32_t st = c->smb2 ? (uint32_t)smb2_get_nterror(c->smb2) : 0;
+      if (st == SMB2_STATUS_OBJECT_NAME_COLLISION || rc == -EEXIST) {
+        seterr(err, errlen, "Déjà sur le PC sous ce nom");
+        result = PGS_EXISTS;
+      } else if (not_found(st)) {
+        seterr(err, errlen, "Introuvable sur le PC : %s", from);
+        result = PGS_NOT_FOUND;
+      } else {
+        result = fail(c, rc, err, errlen);
+      }
+    }
+  }
+  free(src);
+  free(dst);
+  return result;
+}
+
+/** Écrit tout le tampon dans le fichier local (0 si ok). */
+static int write_all(int fd, const uint8_t *buf, size_t len) {
+  while (len > 0) {
+    ssize_t w = write(fd, buf, len);
+    if (w < 0) {
+      if (errno == EINTR) continue;
+      return -1;
+    }
+    buf += w;
+    len -= (size_t)w;
+  }
+  return 0;
+}
+
+int pgs_download(pgs_conn *c, const char *path, const char *local, int64_t expected,
+                 void (*progress)(void *, int64_t), int (*cancelled)(void *), void *ctx, int64_t *got,
+                 char *err, size_t errlen) {
+  *got = 0;
+  struct smb2fh *fh;
+  int64_t size;
+  int result = open_remote(c, path, &fh, &size, err, errlen);
+  if (result != PGS_OK) return result;
+  if (expected >= 0 && size != expected) {
+    // Rien à lire : la copie du PC n'est pas celle attendue.
+    close_remote(c, fh);
+    seterr(err, errlen, "Copie incomplète (%lld octets sur le PC, %lld attendus)", (long long)size, (long long)expected);
+    return PGS_TRANSFER;
+  }
+  int fd = open(local, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+  if (fd < 0) {
+    close_remote(c, fh);
+    seterr(err, errlen, "Impossible d'écrire sur le téléphone");
+    return PGS_TRANSFER;
+  }
+  uint32_t chunk = read_chunk(c);
+  uint8_t *buf = malloc(chunk);
+  int64_t done = 0;
+  if (buf == NULL) {
+    seterr(err, errlen, "Mémoire insuffisante");
+    result = PGS_TRANSFER;
+  }
+  while (buf != NULL && done < size) {
+    if (cancelled && cancelled(ctx)) {
+      seterr(err, errlen, "Arrêté");
+      result = PGS_CANCELLED;
+      break;
+    }
+    uint32_t want = (uint32_t)(size - done < chunk ? size - done : chunk);
+    int n = smb2_pread(c->smb2, fh, buf, want, (uint64_t)done);
+    if (n < 0) {
+      result = fail(c, n, err, errlen);
+      break;
+    }
+    if (n == 0) break; // raccourci entre-temps : contrôlé plus bas
+    if (write_all(fd, buf, (size_t)n) != 0) {
+      seterr(err, errlen, "Écriture sur le téléphone impossible (plus de place ?)");
+      result = PGS_TRANSFER;
+      break;
+    }
+    done += n;
+    if (progress) progress(ctx, done);
+  }
+  free(buf);
+  close_remote(c, fh);
+  if (close(fd) != 0 && result == PGS_OK) {
+    seterr(err, errlen, "Écriture sur le téléphone impossible (plus de place ?)");
+    result = PGS_TRANSFER;
+  }
+  if (result == PGS_OK && expected >= 0 && done != expected) {
+    seterr(err, errlen, "Copie incomplète (%lld sur %lld octets)", (long long)done, (long long)expected);
+    result = PGS_TRANSFER;
+  }
+  // Jamais de fichier à moitié lu laissé sur le téléphone.
+  if (result != PGS_OK) unlink(local);
+  *got = done;
   return result;
 }
 

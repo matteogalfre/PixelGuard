@@ -70,6 +70,16 @@ Même appli, même JS. Seul le module natif change : `modules/pgnative/ios`, en 
 - **Limites** : pas de sauvegarde longue en arrière-plan. L'écran reste allumé pendant l'envoi et l'appli le dit. Si on change d'appli, iOS laisse une trentaine de secondes : l'envoi s'arrête proprement et une vidéo coupée reprendra.
 - **Banc d'essai** : `modules/pgnative/ios-test/run.sh` teste `PgSmb.c` sur le Mac contre impacket (mêmes cas que `jvm-test`). `run.sh --serve` lance le serveur pour essayer l'appli dans le simulateur.
 
+## Outils du PC (0.5.0)
+
+Un écran « Sur le PC » regroupe ce qui regarde les copies déjà faites.
+
+- **Disque dur externe.** Le fichier de préparation du PC (option [S]) marque un dossier du disque (fichier caché `.pixelguard-disque`, le disque est retrouvé quelle que soit sa lettre) et installe une tâche du système « PixelGuard disque dur » (`%ProgramData%\PixelGuard\disque.ps1`). Toutes les 10 minutes, si le disque est branché et que des dossiers du PC ont bougé, robocopy copie les fichiers absents du disque (`/XC /XN /XO` : jamais de remplacement, jamais d'effacement), puis chaque copie est relue des deux côtés (MD5). Le bilan va dans `.pixelguard-disque.json` à la racine du partage : l'appli l'affiche (à jour, fichiers en attente, échecs) et l'utilise pour la carte des mois.
+- **Doublons.** L'appli liste tout le dossier du téléphone sur le PC, relit (MD5) seulement les fichiers de même taille, et propose de garder la copie rangée dans le mois de sa date de prise de vue (EXIF lu sur les 128 premiers Ko), puis le nom d'origine. Les autres vont dans `_Doublons`, au même chemin relatif ; l'index suit la copie gardée. Rien n'est effacé.
+- **Vérifier les copies.** Chaque copie qui a une empreinte (envoyée depuis la 0.4.0) est relue et comparée.
+- **Carte des mois.** Par mois : téléphone (et déjà sur le PC), dossier du mois sur le PC, disque dur (d'après le bilan).
+- **Ramener des photos.** On parcourt les dossiers du PC (vignettes EXIF des JPEG, 64 Ko lus), on choisit, et les fichiers reviennent dans la galerie (Android : `Pictures/PixelGuard` et `Movies/PixelGuard` ; iPhone : Photos).
+
 ## Plus tard, pas dans le prototype
 
 - sauvegarde en arrière-plan avec notification (service de premier plan)

@@ -2,7 +2,7 @@
   "expo": {
     "name": "PixelGuard",
     "slug": "pixelguard-mobile",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -57,7 +57,7 @@
             "video"
           ],
           "photosPermission": "PixelGuard lit tes photos pour les copier sur ton PC.",
-          "savePhotosPermission": "PixelGuard ne crée pas de photo."
+          "savePhotosPermission": "PixelGuard ramène sur ton iPhone les photos que tu choisis sur ton PC."
         }
       ],
       [

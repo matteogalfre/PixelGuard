@@ -206,6 +206,32 @@ class PgNativeModule : Module() {
       withContext(Dispatchers.IO) { guard { verify(uri, remotePath, size.toLong(), expectedMd5) } }
     }
 
+    // ---------- Outils du PC : doublons, vérification, photos ramenées
+
+    AsyncFunction("readRemote") Coroutine { path: String, offset: Double, length: Double ->
+      withContext(Dispatchers.IO) {
+        guard {
+          val bytes = SmbCore.readAt(ensureShare(), path, offset.toLong(), length.toInt().coerceIn(0, 1 shl 20))
+          bytes?.let { android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP) }
+        }
+      }
+    }
+
+    AsyncFunction("remoteMd5") Coroutine { path: String, size: Double ->
+      withContext(Dispatchers.IO) { guard { SmbCore.md5Remote(ensureShare(), path, size.toLong(), maxRead, cancel) } }
+    }
+
+    AsyncFunction("move") Coroutine { from: String, to: String ->
+      withContext(Dispatchers.IO) {
+        guard { SmbCore.move(ensureShare(), from, to) }
+        true
+      }
+    }
+
+    AsyncFunction("download") Coroutine { remotePath: String, size: Double, name: String, video: Boolean, transferId: String ->
+      withContext(Dispatchers.IO) { guard { download(remotePath, size.toLong(), name, video, transferId) } }
+    }
+
     Function("cancel") { cancelled.set(true) }
     Function("resetCancel") { cancelled.set(false) }
 
@@ -991,6 +1017,49 @@ class PgNativeModule : Module() {
     val local = expectedMd5.ifBlank { openOriginal(uri).use { SmbCore.md5(it, cancel) } }
     val remote = SmbCore.md5Remote(ensureShare(), remotePath, size, maxRead, cancel)
     return mapOf("same" to (local == remote), "local" to local, "remote" to remote, "missing" to (remote == null))
+  }
+
+  // Ramène un fichier du PC dans la galerie : Images/PixelGuard ou Films/PixelGuard. Invisible
+  // (IS_PENDING) tant qu'il n'est pas complet ; effacé s'il n'arrive pas en entier.
+  private fun download(remotePath: String, size: Long, name: String, video: Boolean, transferId: String): Map<String, Any?> {
+    if (cancelled.get()) throw PgError("CANCELLED", "Arrêté")
+    val sh = ensureShare()
+    val resolver = context.contentResolver
+    val collection = if (video) {
+      MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    } else {
+      MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    }
+    val ext = name.substringAfterLast('.', "").lowercase()
+    val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+      ?: if (video) "video/mp4" else "image/jpeg"
+    val values = android.content.ContentValues().apply {
+      put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+      put(MediaStore.MediaColumns.MIME_TYPE, mime)
+      put(MediaStore.MediaColumns.RELATIVE_PATH, if (video) "Movies/PixelGuard" else "Pictures/PixelGuard")
+      put(MediaStore.MediaColumns.IS_PENDING, 1)
+    }
+    val uri = resolver.insert(collection, values) ?: throw PgError("SAVE", "Impossible d'ajouter la photo à la galerie")
+    var ok = false
+    try {
+      var lastEmit = 0L
+      val out = resolver.openOutputStream(uri) ?: throw PgError("SAVE", "Impossible d'écrire dans la galerie")
+      out.use {
+        SmbCore.download(sh, remotePath, size, maxRead, it, { bytes ->
+          val now = System.currentTimeMillis()
+          if (now - lastEmit > 200) {
+            lastEmit = now
+            sendEvent("onProgress", mapOf("id" to transferId, "bytes" to bytes.toDouble()))
+          }
+        }, cancel)
+      }
+      resolver.update(uri, android.content.ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+      sendEvent("onProgress", mapOf("id" to transferId, "bytes" to size.toDouble()))
+      ok = true
+      return mapOf("uri" to uri.toString())
+    } finally {
+      if (!ok) try { resolver.delete(uri, null, null) } catch (_: Exception) {}
+    }
   }
 
   private var serviceRunning = false

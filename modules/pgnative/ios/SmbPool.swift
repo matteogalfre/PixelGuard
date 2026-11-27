@@ -57,6 +57,23 @@ private let flagCancelled: @convention(c) (UnsafeMutableRawPointer?) -> Int32 = 
   Unmanaged<Flag>.fromOpaque($0!).takeUnretainedValue().get() ? 1 : 0
 }
 
+/** Arrêter et progression d'un retour vers le téléphone, lus par PgSmb.c. */
+private final class DownloadBox {
+  let cancelled: Flag
+  let onProgress: (Int64) -> Void
+
+  init(cancelled: Flag, progress: @escaping (Int64) -> Void) {
+    self.cancelled = cancelled
+    onProgress = progress
+  }
+}
+
+private func downloadBox(_ ctx: UnsafeMutableRawPointer?) -> DownloadBox {
+  Unmanaged<DownloadBox>.fromOpaque(ctx!).takeUnretainedValue()
+}
+private let downloadProgress: @convention(c) (UnsafeMutableRawPointer?, Int64) -> Void = { downloadBox($0).onProgress($1) }
+private let downloadCancelled: @convention(c) (UnsafeMutableRawPointer?) -> Int32 = { downloadBox($0).cancelled.get() ? 1 : 0 }
+
 /** `total` octets aléatoires : le test de vitesse n'a rien à lire sur le téléphone. */
 final class NoiseSource: ByteSource {
   private let total: Int64
@@ -436,6 +453,56 @@ final class SmbPool {
       if rc == Int(PGS_NOT_FOUND) { return nil }
       if rc != Int(PGS_OK) { throw Self.error(rc, err) }
       return String(cString: out)
+    }
+  }
+
+  /**
+   * Au plus `length` octets (plafonné à 1 Mo) lus à partir de `offset` : l'EXIF d'une copie sans
+   * la ramener en entier. Vide au-delà de la fin, nil si le fichier n'existe pas.
+   */
+  func readRemote(_ path: String, _ offset: Int64, _ length: Int64) throws -> Data? {
+    try with { c in
+      let want = Int(max(0, min(length, Int64(PGS_READ_MAX))))
+      var buf = [UInt8](repeating: 0, count: max(want, 1))
+      var got: Int32 = 0
+      let err = CErr()
+      let rc = buf.withUnsafeMutableBufferPointer { b in
+        code(pgs_read_remote(c, path, offset, Int64(want), b.baseAddress, &got, err.p, CErr.size))
+      }
+      if rc == Int(PGS_NOT_FOUND) { return nil }
+      if rc != Int(PGS_OK) { throw Self.error(rc, err) }
+      return Data(buf[0..<Int(got)])
+    }
+  }
+
+  /**
+   * Renomme `from` en `to` dans le partage, dossiers parents créés, sans jamais écraser (EXISTS).
+   * `from` absent : erreur SMB « Introuvable sur le PC ».
+   */
+  func move(_ from: String, _ to: String) throws {
+    try with { c in
+      let err = CErr()
+      let rc = code(pgs_move(c, from, to, err.p, CErr.size))
+      if rc != Int(PGS_OK) { throw Self.error(rc, err) }
+    }
+  }
+
+  /**
+   * Ramène la copie du PC dans le fichier local `local` et rend les octets reçus. Elle doit faire
+   * `expected` octets (sinon TRANSFER « Copie incomplète »). En cas d'échec ou d'arrêt, le
+   * fichier local est effacé par PgSmb.c.
+   */
+  func download(_ path: String, to local: URL, _ expected: Int64, cancelled: Flag, progress: @escaping (Int64) -> Void) throws -> Int64 {
+    try with { c in
+      let box = DownloadBox(cancelled: cancelled, progress: progress)
+      var got: Int64 = 0
+      let err = CErr()
+      let rc = withExtendedLifetime(box) {
+        code(pgs_download(c, path, local.path, expected, downloadProgress, downloadCancelled,
+                          Unmanaged.passUnretained(box).toOpaque(), &got, err.p, CErr.size))
+      }
+      if rc != Int(PGS_OK) { throw Self.error(rc, err) }
+      return got
     }
   }
 }

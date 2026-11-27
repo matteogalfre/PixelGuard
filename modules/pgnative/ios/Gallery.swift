@@ -336,6 +336,61 @@ final class Gallery {
       completion(ok ? safe.flatMap { urisOf[$0.localIdentifier] ?? [] } : [], nil)
     }
   }
+
+  // ---------------------------------------------------------------- ramener du PC
+
+  /** Accès à la photothèque pour y ranger un fichier ; demandé ici s'il ne l'a jamais été. */
+  private static func canAdd() throws {
+    var st = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    if st == .notDetermined {
+      let done = DispatchSemaphore(value: 0)
+      PHPhotoLibrary.requestAuthorization(for: .readWrite) { _ in done.signal() }
+      done.wait()
+      st = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    }
+    // Un accès limité à quelques photos suffit pour en ajouter.
+    guard st == .authorized || st == .limited else { throw noAccess }
+  }
+
+  private static let noAccess = PgError("NO_ACCESS", "L'iPhone refuse l'accès à Photos : autorise-le dans Réglages › PixelGuard › Photos")
+
+  private final class Outcome {
+    var id: String?
+    var ok = false
+    var error: Error?
+  }
+
+  /**
+   * Range dans la photothèque un fichier ramené du PC. PhotoKit le déplace (pas de seconde copie
+   * sur le téléphone) et garde `name` comme nom d'origine. Renvoie l'uri du nouvel asset, au même
+   * format que celles de `media`. Jamais sur le fil principal : on attend PhotoKit.
+   */
+  func add(_ file: URL, name: String, video: Bool) throws -> String {
+    try Self.canAdd()
+    let outcome = Outcome()
+    let done = DispatchSemaphore(value: 0)
+    PHPhotoLibrary.shared().performChanges({
+      let options = PHAssetResourceCreationOptions()
+      options.shouldMoveFile = true
+      options.originalFilename = name
+      let request = PHAssetCreationRequest.forAsset()
+      request.addResource(with: video ? .video : .photo, fileURL: file, options: options)
+      outcome.id = request.placeholderForCreatedAsset?.localIdentifier
+    }) { ok, error in
+      outcome.ok = ok
+      outcome.error = error
+      done.signal()
+    }
+    done.wait()
+    if let e = outcome.error as? PHPhotosError, e.code == .accessUserDenied || e.code == .accessRestricted {
+      throw Self.noAccess
+    }
+    guard outcome.ok, let id = outcome.id else {
+      let why = outcome.error?.localizedDescription ?? "raison inconnue"
+      throw PgError("TRANSFER", "Photos n'a pas accepté « \(name) » (\(why))")
+    }
+    return "ph://\(id)"
+  }
 }
 
 /**
